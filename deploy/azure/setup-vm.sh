@@ -9,7 +9,7 @@
 #   1. ставит Docker (если его нет);
 #   2. создаёт .env (спрашивает токен бота и домен);
 #   3. если порты 80/443 свободны — поднимает бота + Caddy с автоматическим HTTPS;
-#      если заняты (например, nginx другого бота) — поднимает только бота на 127.0.0.1:8080
+#      если заняты другим проектом — поднимает только бота на свободном локальном порту (8080–8099)
 #      и печатает готовый блок для nginx.
 set -euo pipefail
 
@@ -54,17 +54,42 @@ DOMAIN="$(grep -E '^DOMAIN=' .env | cut -d= -f2- || true)"
 
 port_busy() { sudo ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
 
-if port_busy 80 || port_busy 443; then
-  warn "Порты 80/443 уже заняты другим сервисом (скорее всего, веб-сервер другого бота)."
-  warn "Поднимаю только бота на 127.0.0.1:8080 — подключите его к существующему nginx."
-  cat > docker-compose.override.yml <<'EOF'
+free_port() {
+  local p
+  for p in $(seq 8080 8099); do
+    if ! port_busy "$p"; then echo "$p"; return; fi
+  done
+  echo "Нет свободного порта в диапазоне 8080–8099" >&2
+  return 1
+}
+
+# Повторный запуск: не путать свои же контейнеры с чужими сервисами.
+if [[ -f docker-compose.override.yml ]]; then
+  MODE=proxy
+elif [[ -n "$($DOCKER compose ps -q caddy 2>/dev/null)" ]]; then
+  MODE=caddy
+elif port_busy 80 || port_busy 443; then
+  MODE=proxy
+else
+  MODE=caddy
+fi
+
+if [[ "$MODE" == proxy ]]; then
+  if [[ -f docker-compose.override.yml ]]; then
+    LOCAL_PORT="$(grep -oE '127\.0\.0\.1:[0-9]+' docker-compose.override.yml | cut -d: -f2)"
+  else
+    LOCAL_PORT="$(free_port)"
+    cat > docker-compose.override.yml <<EOF
 services:
   bot:
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${LOCAL_PORT}:8080"
   caddy:
     profiles: ["disabled"]
 EOF
+  fi
+  warn "Порты 80/443 уже заняты другим проектом на этом сервере."
+  warn "Поднимаю только бота на 127.0.0.1:${LOCAL_PORT} — подключите его к существующему веб-серверу."
   $DOCKER compose up -d --build bot
   cat <<EOF
 
@@ -74,7 +99,7 @@ server {
     server_name ${DOMAIN};
     client_max_body_size 25m;
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:${LOCAL_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
