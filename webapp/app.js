@@ -931,7 +931,8 @@ function teamCard() {
             m.is_admin ? h("span", { class: "chip" }, "админ") : null,
             m.is_pm ? h("span", { class: "chip" }, "PM") : null,
             m.connected ? h("span", { class: "chip s-done" }, "в боте") : h("span", { class: "chip warn" }, "не нажал Start")),
-          h("div", { class: "hint" }, `${m.role || ""}${m.username ? " · @" + m.username : ""}`))))),
+          h("div", { class: "hint" }, `${m.role || ""}${m.username ? " · @" + m.username : ""}`),
+          m.assists_id && member(m.assists_id) ? h("div", { class: "hint" }, "выполняет задачи за: " + member(m.assists_id).name) : null)))),
     h("button", { class: "btn secondary block", style: "margin-top:10px", onclick: () => openMemberForm(null) }, "➕ Добавить участника"));
 }
 
@@ -942,6 +943,9 @@ function openMemberForm(m) {
     role: h("input", { value: m ? m.role : "" }),
     aliases: h("input", { value: m ? m.aliases : "", placeholder: "Другие написания через запятую" }),
     phone: h("input", { type: "tel", value: m ? m.phone : "" }),
+    assists_id: h("select", null, h("option", { value: "" }, "— ни за кого —"),
+      state.boot.members.filter((x) => x.active && (!m || x.id !== m.id))
+        .map((x) => h("option", { value: x.id, selected: m && m.assists_id === x.id }, x.name))),
   };
   const admin = h("input", { type: "checkbox", checked: m && m.is_admin });
   const pm = h("input", { type: "checkbox", checked: m && m.is_pm });
@@ -951,6 +955,7 @@ function openMemberForm(m) {
     h("div", { class: "card" },
       field("Имя *", f.name), field("Telegram-ник", f.username), field("Роль", f.role),
       field("Другие написания", f.aliases), field("Телефон (для обзвона)", f.phone),
+      field("Выполняет задачи за (те же задачи и напоминания)", f.assists_id),
       h("label", { class: "check" }, admin, "Администратор (загрузка таблиц, любые правки)"),
       h("label", { class: "check" }, pm, "Получает эскалации и сводку PM"),
       h("label", { class: "check" }, active, "Активен"),

@@ -105,6 +105,7 @@ class Member:
     is_pm: bool = False
     telegram_id: int | None = None
     active: bool = True
+    assists_id: int | None = None  # помогает этому участнику: получает те же задачи и напоминания
 
     @property
     def mention(self) -> str:
@@ -136,6 +137,7 @@ class Member:
             "is_pm": self.is_pm,
             "connected": self.telegram_id is not None,
             "active": self.active,
+            "assists_id": self.assists_id,
         }
 
 

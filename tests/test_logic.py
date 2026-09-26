@@ -132,3 +132,15 @@ def test_propose_deadlines_never_in_past():
     team = logic.Team(members())
     proposals = logic.propose_deadlines([task(1, title="Key Visual")], team, TODAY + timedelta(days=5), TODAY)
     assert proposals[0]["deadline"] == TODAY.isoformat() and "сжато" in proposals[0]["note"]
+
+
+def test_helper_gets_tasks_of_member_they_assist():
+    babur = Member(id=5, name="Бабур", username="rrkaier", assists_id=2)
+    team = logic.Team(members() + [babur])
+    assert [m.name for m in team.match("Сарвар")[0]] == ["Сарвар", "Бабур"]
+    assert [m.name for m in team.match("Сарвар / Сардор")[0]] == ["Сарвар", "Сардор", "Бабур"]
+    assert [m.name for m in team.match("Сардор")[0]] == ["Сардор"]
+    tasks = [task(1, responsible="Сарвар"), task(2, responsible="Сардор")]
+    assert [t.id for t in team.tasks_of(babur, tasks)] == [1]
+    inactive = logic.Team(members() + [Member(id=5, name="Бабур", assists_id=2, active=False)])
+    assert [m.name for m in inactive.match("Сарвар")[0]] == ["Сарвар"]

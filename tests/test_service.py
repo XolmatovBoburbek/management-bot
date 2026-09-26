@@ -5,7 +5,7 @@ import pytest
 from app.models import DONE, DONE_LATE, PROGRESS
 from app.scheduler import Scheduler
 from app.service import AccessError
-from tests.conftest import TZ, member
+from tests.conftest import TZ, make_workbook, member
 
 SARVAR_TG, PM_TG, HEAD_TG, MUH_TG, SARDOR_TG = 106, 102, 101, 103, 107
 
@@ -268,3 +268,57 @@ async def test_comment_lines_use_local_date(service, workbook, clock):
     clock.value = datetime(2026, 9, 27, 1, 0, tzinfo=TZ)  # в UTC это ещё 26.09
     await service.add_comment(kv, "Ночная правка", member(service, "gflwwc"))
     assert service.db.comment_lines(project.id)[kv.id] == ["[27.09 Сарвар] Ночная правка"]
+
+
+async def test_helper_gets_same_tasks_and_reminders(service, tmp_path, notifier, clock):
+    babur, shahzod = member(service, "rrkaier"), member(service, "s_maxhan")
+    assert babur.assists_id == shahzod.id  # из config/team.yaml
+    service.db.bind_telegram(babur.id, 108)
+    rows = [(1, "ТЕХНИЧЕСКАЯ ЧАСТЬ", "Звуковой пакет", "", "Критично", "Шахзод", "задача не начата", None,
+             date(2026, 9, 26), "Технический подрядчик", "", "")]
+    wb = make_workbook(tmp_path / "s.xlsx", tasks=rows)
+    await service.import_file(wb.read_bytes(), "s.xlsx", shahzod)
+    assert any("Звуковой пакет" in m for m in notifier.to(108))
+    notifier.messages.clear()
+    await service.import_file(wb.read_bytes(), "s.xlsx", shahzod)
+    assert notifier.messages == []  # повторная синхронизация не присылает помощнику то же самое
+    project = service.default_project()
+    clock.value = datetime(2026, 9, 26, 9, 5, tzinfo=TZ)
+    await service.send_morning(project)
+    assert any("Выполнили?" in m and "Звуковой пакет" in m for m in notifier.to(108))
+    assert any("Выполнили?" in m and "Звуковой пакет" in m for m in notifier.to(PM_TG))
+
+
+async def test_assists_validation(service):
+    pm = member(service, "s_maxhan")
+    sarvar = member(service, "gflwwc")
+    with pytest.raises(ValueError):
+        service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc", "assists_id": sarvar.id})
+    with pytest.raises(ValueError):
+        service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc", "assists_id": 9999})
+    saved = service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc",
+                                     "assists_id": str(pm.id), "active": True})
+    assert saved.assists_id == pm.id
+    cleared = service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc", "assists_id": "",
+                                       "active": True})
+    assert cleared.assists_id is None
+
+
+def test_existing_database_gets_assists_column(tmp_path):
+    import sqlite3
+
+    from app.db import Database
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE members (id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT UNIQUE, "
+                 "role TEXT DEFAULT '', aliases TEXT DEFAULT '', phone TEXT DEFAULT '', is_admin INTEGER DEFAULT 0, "
+                 "is_pm INTEGER DEFAULT 0, telegram_id INTEGER UNIQUE, active INTEGER DEFAULT 1, created_at TEXT)")
+    conn.execute("INSERT INTO members(name, username, telegram_id) VALUES('Шахзод', 's_maxhan', 102)")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    old = db.member_by_username("s_maxhan")
+    assert old.assists_id is None and old.telegram_id == 102
+    helper = db.upsert_member(name="Бабур", username="rrkaier", assists_id=old.id)
+    assert db.get_member(helper.id).assists_id == old.id

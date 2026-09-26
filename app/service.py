@@ -116,13 +116,18 @@ class Service:
         if self.db.list_members(include_inactive=True) or not path.exists():
             return 0
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        created = []
         for item in data.get("members", []):
-            self.db.upsert_member(
+            created.append((item, self.db.upsert_member(
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
                 aliases=str(item.get("aliases", "")), phone=str(item.get("phone", "")),
                 is_admin=bool(item.get("admin")), is_pm=bool(item.get("pm")),
-            )
-        return len(data.get("members", []))
+            )))
+        for item, member in created:
+            target = self.db.member_by_username(str(item.get("assists", "")))
+            if target and target.id != member.id:
+                self.db.set_assists(member.id, target.id)
+        return len(created)
 
     def identify(self, telegram_id: int, username: str | None) -> Member | None:
         member = self.db.member_by_telegram(telegram_id)
@@ -142,12 +147,18 @@ class Service:
         member_id = data.get("id")
         if member_id and int(member_id) == actor.id and not data.get("is_admin", True):
             raise ValueError("Нельзя снять права администратора с самого себя")
+        assists_id = int(data["assists_id"]) if data.get("assists_id") else None
+        if assists_id is not None:
+            if member_id and assists_id == int(member_id):
+                raise ValueError("Участник не может выполнять задачи сам за себя")
+            if not self.db.get_member(assists_id):
+                raise ValueError("Участник, за которого выполняются задачи, не найден")
         return self.db.upsert_member(
             member_id=int(member_id) if member_id else None, name=name,
             username=str(data.get("username", "")), role=str(data.get("role", "")),
             aliases=str(data.get("aliases", "")), phone=str(data.get("phone", "")),
             is_admin=bool(data.get("is_admin")), is_pm=bool(data.get("is_pm")),
-            active=bool(data.get("active", True)),
+            active=bool(data.get("active", True)), assists_id=assists_id,
         )
 
     def _require_admin(self, actor: Member | None) -> None:

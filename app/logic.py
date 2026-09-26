@@ -51,11 +51,15 @@ class Team:
         self.members = [m for m in members if m.active]
         self.by_id = {m.id: m for m in self.members}
         self._keys: dict[str, Member] = {}
+        self._helpers: dict[int, list[Member]] = defaultdict(list)
         for member in self.members:
             for key in member.match_keys():
                 self._keys.setdefault(key, member)
+            if member.assists_id and member.assists_id != member.id:
+                self._helpers[member.assists_id].append(member)
 
     def match(self, responsible: str) -> tuple[list[Member], list[str]]:
+        """Участники по колонке «Ответственный»; помощники получают задачи тех, кому помогают."""
         matched: list[Member] = []
         unknown: list[str] = []
         for part in _SPLIT.split(responsible or ""):
@@ -68,6 +72,10 @@ class Team:
                     matched.append(member)
             else:
                 unknown.append(part.strip())
+        for member in list(matched):
+            for helper in self._helpers.get(member.id, []):
+                if helper not in matched:
+                    matched.append(helper)
         return matched, unknown
 
     def assignees(self, task: Task) -> list[Member]:
