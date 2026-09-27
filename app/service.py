@@ -122,6 +122,7 @@ class Service:
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
                 aliases=str(item.get("aliases", "")), phone=str(item.get("phone", "")),
                 is_admin=bool(item.get("admin")), is_pm=bool(item.get("pm")),
+                is_observer=bool(item.get("observer")),
             )))
         for item, member in created:
             target = self.db.member_by_username(str(item.get("assists", "")))
@@ -159,6 +160,7 @@ class Service:
             aliases=str(data.get("aliases", "")), phone=str(data.get("phone", "")),
             is_admin=bool(data.get("is_admin")), is_pm=bool(data.get("is_pm")),
             active=bool(data.get("active", True)), assists_id=assists_id,
+            is_observer=bool(data.get("is_observer")),
         )
 
     def _require_admin(self, actor: Member | None) -> None:
@@ -442,6 +444,8 @@ class Service:
                                self.db.call_checks(project.id, today), today, self.now())
 
     def check_call_item(self, project: Project, key: str, actor: Member, note: str = "", checked: bool = True) -> None:
+        if actor.is_observer and not actor.is_admin:
+            raise AccessError("Наблюдатель только просматривает обзвон")
         self.db.set_call_check(project.id, self.today(), key, actor.id, note.strip()[:500], checked)
         if checked and key.startswith("call:"):
             call = self.db.get_call(int(key.split(":", 1)[1]))
@@ -472,6 +476,8 @@ class Service:
         return call
 
     async def finish_call(self, call: Call, actor: Member, result: str = "") -> Call:
+        if call.member_id != actor.id and call.created_by != actor.id:
+            self._require_admin(actor)
         call = self.db.update_call(call.id, status="done", result=result.strip()[:500], done_at=self.now())
         if call.task_id:
             self.db.add_event(call.task_id, "call", f"созвонились: {call.contact}" + (f" — {result}" if result else ""),
@@ -491,6 +497,10 @@ class Service:
         members = self.db.list_members()
         pms = [m for m in members if m.is_pm]
         return pms or [m for m in members if m.is_admin]
+
+    def _digest_recipients(self) -> list[Member]:
+        """Утреннюю сводку получают PM и наблюдатели."""
+        return self._pms() + [m for m in self.db.list_members() if m.is_observer and not m.is_pm]
 
     async def _to_group(self, text: str, keyboard: InlineKeyboardMarkup | None = None) -> None:
         chat_id = self.settings().get("group_chat_id")
@@ -619,7 +629,7 @@ class Service:
         calls = [i for i in self.call_items(project) if not i["check"]]
         text = texts.pm_digest(project, tasks, team, today, attention=logic.attention(tasks, today),
                                done_yesterday=done, calls_count=len(calls), audit=audit)
-        for pm in self._pms():
+        for pm in self._digest_recipients():
             if pm.telegram_id and self.db.mark_sent(f"pm:{project.id}:{today}:{pm.id}"):
                 await self.notifier.send(pm.telegram_id, text, keyboards.pm_actions(self.webapp_url))
         if self.settings().get("group_chat_id") and self.db.mark_sent(f"group:{project.id}:{today}"):

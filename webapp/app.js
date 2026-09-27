@@ -151,6 +151,9 @@ function dueLabel(t) {
 function member(id) { return state.boot.members.find((m) => m.id === id); }
 function me() { return state.boot.me; }
 function isAdmin() { return !!state.boot.me.is_admin; }
+// наблюдатель видит весь проект, но ничего не меняет
+function seesAll() { return isAdmin() || !!state.boot.me.is_observer; }
+function readOnly() { return !isAdmin() && !!state.boot.me.is_observer; }
 function project() { return state.data && state.data.project; }
 function tasks() { return (state.data && state.data.tasks) || []; }
 function initials(name) { return (name || "?").trim().slice(0, 1).toUpperCase(); }
@@ -179,7 +182,7 @@ async function init() {
   state.pid = (projects.find((p) => p.id === saved) || projects[0] || {}).id || null;
   const requested = params.get("tab");
   const allowed = tabs().map((t) => t.id);
-  state.tab = allowed.includes(requested) ? requested : (isAdmin() ? "home" : "my");
+  state.tab = allowed.includes(requested) ? requested : (seesAll() ? "home" : "my");
   await loadProject();
   render();
   const taskId = Number(params.get("task"));
@@ -414,6 +417,8 @@ function viewHome() {
       ? "Горящих сроков нет — но у задач не заполнены дедлайны"
       : "Горящих задач нет 👌"));
 
+  if (readOnly() && d.audit.length) out.push(auditCard());
+
   out.push(h("div", { class: "section" }, "👥 Команда"));
   out.push(h("div", { class: "card flush" }, d.workload.filter((w) => w.total || isAdmin()).map((w) =>
     h("div", { class: "list-item", style: "cursor:pointer", onclick: () => openTasksWith({ member: String(w.member_id) }) },
@@ -533,7 +538,7 @@ function viewCalls() {
   out.push(h("div", { class: "card" },
     h("div", { class: "row" }, h("b", { style: "flex:1" }, `Обзвон на ${fmtDate(c.today, true)}`),
       h("span", { class: "hint" }, `${doneCount}/${items.length}`)),
-    h("div", { class: "hint", style: "margin-top:4px" }, isAdmin()
+    h("div", { class: "hint", style: "margin-top:4px" }, seesAll()
       ? "Бот сам собирает, кому позвонить: просрочки, «нужна помощь», сроки сегодня/завтра без старта, подрядчики по ближайшим задачам."
       : "Ваши запланированные звонки. Бот напомнит в назначенное время."),
     items.length ? h("div", { style: "margin-top:10px" }, progressBar(items.length ? (100 * doneCount) / items.length : 0)) : null));
@@ -555,12 +560,12 @@ function viewCalls() {
           h("div", { class: "hint" }, fmtDateTime(p.due_at) + (who ? " · звонит " + who.name : "")),
           p.phone ? h("a", { href: "tel:" + p.phone }, p.phone) : null,
           p.note ? h("div", { class: "hint" }, p.note) : null),
-        h("div", { class: "row" },
+        isAdmin() || p.member_id === me().id ? h("div", { class: "row" },
           h("button", { class: "btn small green", onclick: () => run(() => api(`/api/calls/${p.id}/done`, { json: {} }), "Отмечено").then(() => switchTab("calls")) }, "✓"),
-          h("button", { class: "btn small secondary", onclick: () => run(() => api(`/api/calls/${p.id}/cancel`, { json: {} }), "Отменено").then(() => switchTab("calls")) }, "✕")));
+          h("button", { class: "btn small secondary", onclick: () => run(() => api(`/api/calls/${p.id}/cancel`, { json: {} }), "Отменено").then(() => switchTab("calls")) }, "✕")) : null);
     })));
   }
-  out.push(h("button", { class: "btn block", style: "margin-top:8px", onclick: () => openCallForm(null) }, "📞 Запланировать звонок"));
+  if (!readOnly()) out.push(h("button", { class: "btn block", style: "margin-top:8px", onclick: () => openCallForm(null) }, "📞 Запланировать звонок"));
   return h("div", null, out);
 }
 
@@ -575,7 +580,7 @@ function callItem(item) {
   if (item.username) contacts.push(h("a", { href: `https://t.me/${item.username}` }, "@" + item.username));
   if (item.phone) contacts.push(h("a", { href: "tel:" + item.phone }, item.phone));
   return h("div", { class: "list-item call-item" + (done ? " done" : "") },
-    h("button", { class: "call-check" + (done ? " on" : ""), onclick: toggle, "aria-label": "Отметить" }, done ? "✓" : ""),
+    h("button", { class: "call-check" + (done ? " on" : ""), onclick: toggle, disabled: readOnly(), "aria-label": "Отметить" }, done ? "✓" : ""),
     h("div", { class: "grow" },
       h("div", { class: "name" }, item.title),
       h("div", { class: "hint" }, [item.subtitle, item.caller ? "звонит " + item.caller : "", item.due_at ? fmtDateTime(item.due_at) : ""].filter(Boolean).join(" · ")),
@@ -930,6 +935,7 @@ function teamCard() {
           h("div", { class: "row wrap" }, h("span", { class: "name" }, m.name),
             m.is_admin ? h("span", { class: "chip" }, "админ") : null,
             m.is_pm ? h("span", { class: "chip" }, "PM") : null,
+            m.is_observer ? h("span", { class: "chip" }, "наблюдатель") : null,
             m.connected ? h("span", { class: "chip s-done" }, "в боте") : h("span", { class: "chip warn" }, "не нажал Start")),
           h("div", { class: "hint" }, `${m.role || ""}${m.username ? " · @" + m.username : ""}`),
           m.assists_id && member(m.assists_id) ? h("div", { class: "hint" }, "выполняет задачи за: " + member(m.assists_id).name) : null)))),
@@ -949,6 +955,7 @@ function openMemberForm(m) {
   };
   const admin = h("input", { type: "checkbox", checked: m && m.is_admin });
   const pm = h("input", { type: "checkbox", checked: m && m.is_pm });
+  const observer = h("input", { type: "checkbox", checked: m && m.is_observer });
   const active = h("input", { type: "checkbox", checked: !m || m.active });
   showSheet(h("div", null,
     h("h2", null, m ? m.name : "Новый участник"),
@@ -958,10 +965,11 @@ function openMemberForm(m) {
       field("Выполняет задачи за (те же задачи и напоминания)", f.assists_id),
       h("label", { class: "check" }, admin, "Администратор (загрузка таблиц, любые правки)"),
       h("label", { class: "check" }, pm, "Получает эскалации и сводку PM"),
+      h("label", { class: "check" }, observer, "Наблюдатель (видит весь проект и получает утреннюю сводку, ничего не меняет)"),
       h("label", { class: "check" }, active, "Активен"),
       h("button", { class: "btn block", style: "margin-top:8px", onclick: async () => {
         const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-        Object.assign(body, { id: m ? m.id : null, is_admin: admin.checked, is_pm: pm.checked, active: active.checked });
+        Object.assign(body, { id: m ? m.id : null, is_admin: admin.checked, is_pm: pm.checked, is_observer: observer.checked, active: active.checked });
         await run(() => api("/api/members", { json: body }), "Сохранено");
         closeSheet();
         await reloadBoot();

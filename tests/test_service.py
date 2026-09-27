@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from app import logic
 from app.models import DONE, DONE_LATE, PROGRESS
 from app.scheduler import Scheduler
 from app.service import AccessError
@@ -304,7 +305,47 @@ async def test_assists_validation(service):
     assert cleared.assists_id is None
 
 
-def test_existing_database_gets_assists_column(tmp_path):
+async def test_observer_gets_digest_but_changes_nothing(service, workbook, notifier, clock):
+    ibragim = member(service, "ik7777777777")
+    assert ibragim.is_observer and not ibragim.is_admin and not ibragim.is_pm  # из config/team.yaml
+    service.db.bind_telegram(ibragim.id, 110)
+    project = await load(service, workbook)
+    kv = by_title(service, project)["Key Visual мероприятия"]
+    with pytest.raises(AccessError):
+        await service.set_status(kv, DONE, ibragim)
+    await service.report_problem(kv, "Нужен бриф", member(service, "gflwwc"))
+    clock.value = datetime(2026, 9, 29, 9, 30, tzinfo=TZ)
+    await service.send_morning(project)
+    await service.send_evening(project)
+    assert notifier.to(110) == []  # ни задач, ни эскалаций, ни личных напоминаний
+    await service.send_pm_digest(project)
+    assert len(notifier.to(110)) == 1 and "Сводка" in notifier.to(110)[0]
+
+    pm = member(service, "s_maxhan")
+    call = await service.create_call(project, {"contact": "DJ", "due_at": "2026-09-29T15:00"}, pm)
+    with pytest.raises(AccessError):
+        service.check_call_item(project, f"call:{call.id}", ibragim)
+    with pytest.raises(AccessError):
+        await service.finish_call(call, ibragim)
+    assert service.db.get_call(call.id).status == "planned"
+
+    tasks, team = service.db.list_tasks(project.id), service.team()
+    assert ibragim.id not in {r["member_id"] for r in logic.workload(tasks, team, service.today())}
+    idle = next(i for i in logic.audit(project, tasks, team, [], service.today()) if i["title"] == "Участники без задач")
+    assert not any("Ибрагим" in x for x in idle["items"])
+
+
+async def test_observer_flag_is_saved_from_panel(service):
+    pm = member(service, "s_maxhan")
+    sarvar = member(service, "gflwwc")
+    saved = service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc", "is_observer": True,
+                                     "active": True})
+    assert saved.is_observer and saved.sees_all and not saved.is_admin
+    assert not service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc",
+                                         "active": True}).is_observer
+
+
+def test_existing_database_gets_new_member_columns(tmp_path):
     import sqlite3
 
     from app.db import Database
@@ -322,3 +363,6 @@ def test_existing_database_gets_assists_column(tmp_path):
     assert old.assists_id is None and old.telegram_id == 102
     helper = db.upsert_member(name="Бабур", username="rrkaier", assists_id=old.id)
     assert db.get_member(helper.id).assists_id == old.id
+    assert not old.is_observer
+    watcher = db.upsert_member(name="Ибрагим", username="ik7777777777", is_observer=True)
+    assert db.get_member(watcher.id).is_observer

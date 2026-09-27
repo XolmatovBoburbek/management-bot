@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS members (
     telegram_id INTEGER UNIQUE,
     active INTEGER DEFAULT 1,
     assists_id INTEGER,
+    is_observer INTEGER DEFAULT 0,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS projects (
@@ -201,6 +202,7 @@ def _member_from_row(row: sqlite3.Row) -> Member:
         telegram_id=row["telegram_id"],
         active=bool(row["active"]),
         assists_id=row["assists_id"],
+        is_observer=bool(row["is_observer"]),
     )
 
 
@@ -278,6 +280,8 @@ class Database:
         columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(members)")}
         if "assists_id" not in columns:
             self.conn.execute("ALTER TABLE members ADD COLUMN assists_id INTEGER")
+        if "is_observer" not in columns:
+            self.conn.execute("ALTER TABLE members ADD COLUMN is_observer INTEGER DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -334,7 +338,7 @@ class Database:
 
     def upsert_member(self, *, name: str, username: str = "", role: str = "", aliases: str = "", phone: str = "",
                       is_admin: bool = False, is_pm: bool = False, member_id: int | None = None,
-                      active: bool = True, assists_id: int | None = None) -> Member:
+                      active: bool = True, assists_id: int | None = None, is_observer: bool = False) -> Member:
         uname = username.lstrip("@").strip().lower() or None
         if uname:
             taken = self.conn.execute("SELECT id FROM members WHERE lower(username) = ?", (uname,)).fetchone()
@@ -346,16 +350,17 @@ class Database:
         if member_id is None:
             cur = self.conn.execute(
                 "INSERT INTO members(name, username, role, aliases, phone, is_admin, is_pm, active, assists_id, "
-                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "is_observer, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (name, uname, role, aliases, phone, int(is_admin), int(is_pm), int(active), assists_id,
-                 self._now_iso()),
+                 int(is_observer), self._now_iso()),
             )
             member_id = cur.lastrowid
         else:
             self.conn.execute(
                 "UPDATE members SET name=?, username=?, role=?, aliases=?, phone=?, is_admin=?, is_pm=?, active=?, "
-                "assists_id=? WHERE id=?",
-                (name, uname, role, aliases, phone, int(is_admin), int(is_pm), int(active), assists_id, member_id),
+                "assists_id=?, is_observer=? WHERE id=?",
+                (name, uname, role, aliases, phone, int(is_admin), int(is_pm), int(active), assists_id,
+                 int(is_observer), member_id),
             )
         self.conn.commit()
         return self.get_member(member_id)  # type: ignore[return-value]

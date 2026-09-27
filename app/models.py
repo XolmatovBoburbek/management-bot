@@ -106,6 +106,11 @@ class Member:
     telegram_id: int | None = None
     active: bool = True
     assists_id: int | None = None  # помогает этому участнику: получает те же задачи и напоминания
+    is_observer: bool = False  # наблюдатель: видит весь проект и получает сводку, но ничего не меняет
+
+    @property
+    def sees_all(self) -> bool:
+        return self.is_admin or self.is_observer
 
     @property
     def mention(self) -> str:
@@ -138,6 +143,7 @@ class Member:
             "connected": self.telegram_id is not None,
             "active": self.active,
             "assists_id": self.assists_id,
+            "is_observer": self.is_observer,
         }
 
 

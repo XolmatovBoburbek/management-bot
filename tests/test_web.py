@@ -119,6 +119,25 @@ async def test_members_and_calls_api(client, service):
     assert len(calls["planned"]) == 1 and calls["items"][0]["kind"] == "scheduled"
 
 
+async def test_observer_sees_everything_read_only(client, workbook, service):
+    await upload(client, workbook, auth())
+    project = service.default_project()
+    call = await service.create_call(project, {"contact": "DJ", "due_at": "2026-09-26T16:00"},
+                                     service.db.member_by_username("s_maxhan"))
+    watcher = auth(110, "ik7777777777")
+    boot = await (await client.get("/api/bootstrap", headers=watcher)).json()
+    assert boot["me"]["is_observer"] and not boot["me"]["is_admin"] and boot["settings"] == {}
+    data = await (await client.get(f"/api/projects/{project.id}", headers=watcher)).json()
+    assert data["audit"] and not any(t["can_edit"] for t in data["tasks"])
+    calls = await (await client.get(f"/api/projects/{project.id}/calls", headers=watcher)).json()
+    assert [c["id"] for c in calls["planned"]] == [call.id] and any(i["kind"] != "scheduled" for i in calls["items"])
+    task_id = data["tasks"][0]["id"]
+    assert (await client.post(f"/api/tasks/{task_id}/status", json={"status": "done"}, headers=watcher)).status == 403
+    assert (await client.post(f"/api/calls/{call.id}/done", json={}, headers=watcher)).status == 403
+    assert (await client.post(f"/api/projects/{project.id}/calls/check", json={"key": f"call:{call.id}"},
+                              headers=watcher)).status == 403
+
+
 async def test_static_and_health(client):
     assert (await client.get("/health")).status == 200
     page = await client.get("/")

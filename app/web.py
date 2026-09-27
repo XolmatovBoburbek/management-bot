@@ -128,7 +128,7 @@ async def project_data(request: web.Request) -> web.Response:
         "attention": [t.id for t in logic.attention(tasks, today, limit=15)],
         "milestones": [m.to_dict(project.event_date) for m in milestones],
         "risks": [r.to_dict() for r in service.db.list_risks(project.id)],
-        "audit": logic.audit(project, tasks, team, milestones, today) if me.is_admin else [],
+        "audit": logic.audit(project, tasks, team, milestones, today) if me.sees_all else [],
     })
 
 
@@ -290,10 +290,10 @@ async def calls_get(request: web.Request) -> web.Response:
     project = _project(request)
     me = _member(request)
     items = service.call_items(project)
-    if not me.is_admin:
+    if not me.sees_all:
         items = [i for i in items if i["kind"] == "scheduled" and i.get("caller") == me.name]
     planned = [c.to_dict() for c in service.db.list_calls(project.id)
-               if me.is_admin or c.member_id == me.id]
+               if me.sees_all or c.member_id == me.id]
     return web.json_response({"items": items, "planned": planned, "today": service.today().isoformat()})
 
 

@@ -159,20 +159,32 @@ def build_router(service: Service) -> Router:
             len([t for t in team.tasks_of(member, service.db.list_tasks(p.id)) if t.is_open()])
             for p in service.projects())
         role = f" · {texts.e(member.role)}" if member.role else ""
-        lines = [
-            f"👋 {texts.e(member.name)}, вы подключены!{role}",
-            "",
-            f"Открытых задач: <b>{total_open}</b>." if service.projects() else "Проектов пока нет.",
-            "",
-            "Каждое утро я пишу ваши задачи на день и спрашиваю «выполнено?» по горящим срокам, "
-            "вечером — «успеваете?» по завтрашним.",
-            "",
-            "Кнопка <b>«Открыть»</b> внизу слева — ваш личный кабинет с задачами и сроками.",
-        ]
+        observer_view = member.is_observer and not member.is_admin and not total_open
+        if observer_view:
+            lines = [
+                f"👋 {texts.e(member.name)}, вы подключены как наблюдатель.{role}",
+                "",
+                "Каждое утро я присылаю сводку по проекту: просрочки, блокеры, что закрыто за сутки. "
+                "/summary — сводка сейчас, /calls — обзвон на сегодня.",
+                "",
+                "Кнопка <b>«Открыть»</b> внизу слева — все задачи, обзор команды и обзвон (только просмотр).",
+            ]
+        else:
+            lines = [
+                f"👋 {texts.e(member.name)}, вы подключены!{role}",
+                "",
+                f"Открытых задач: <b>{total_open}</b>." if service.projects() else "Проектов пока нет.",
+                "",
+                "Каждое утро я пишу ваши задачи на день и спрашиваю «выполнено?» по горящим срокам, "
+                "вечером — «успеваете?» по завтрашним.",
+                "",
+                "Кнопка <b>«Открыть»</b> внизу слева — ваш личный кабинет с задачами и сроками.",
+            ]
         if member.is_admin:
             lines += ["", "Вы администратор: пришлите сюда Excel-файл с задачами или ссылку на Google Таблицу "
                           "командой /sheet. /help — все команды."]
-        await message.answer("\n".join(lines), reply_markup=keyboards.app_only(service.webapp_url, query="?tab=my"))
+        await message.answer("\n".join(lines), reply_markup=keyboards.app_only(
+            service.webapp_url, query="?tab=home" if observer_view else "?tab=my"))
         if service.webapp_url.startswith("https://"):
             try:
                 await message.bot.set_chat_menu_button(
@@ -213,7 +225,7 @@ def build_router(service: Service) -> Router:
         today = service.today()
         team = service.team()
         tasks = service.db.list_tasks(project.id)
-        if _is_private(message) and member.is_admin:
+        if _is_private(message) and member.sees_all:
             audit = logic.audit(project, tasks, team, service.db.list_milestones(project.id), today)
             calls = [i for i in service.call_items(project) if not i["check"]]
             text = texts.pm_digest(project, tasks, team, today, attention=logic.attention(tasks, today),
@@ -229,7 +241,7 @@ def build_router(service: Service) -> Router:
         if not member or not project:
             return
         items = service.call_items(project)
-        if not member.is_admin:
+        if not member.sees_all:
             items = [i for i in items if i["kind"] == "scheduled" and i.get("caller") == member.name]
         if not items:
             await message.answer("📞 На сегодня обзванивать некого 👌")

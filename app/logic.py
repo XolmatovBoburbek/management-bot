@@ -186,7 +186,8 @@ def workload(tasks: list[Task], team: Team, today: date) -> list[dict]:
                 row["nodate"] += 1
             elif 0 <= (t.deadline - today).days <= WEEK_DAYS:
                 row["due_week"] += 1
-    result = list(rows.values())
+    # наблюдатель без задач — не часть рабочей нагрузки
+    result = [r for r in rows.values() if r["total"] or not team.by_id[r["member_id"]].is_observer]
     open_counts = sorted(r["open"] for r in result if r["open"])
     median = open_counts[len(open_counts) // 2] if open_counts else 0
     for r in result:

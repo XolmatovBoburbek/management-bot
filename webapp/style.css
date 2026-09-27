@@ -213,6 +213,7 @@ details.card[open] summary { margin-bottom: 10px; }
   display: grid; place-items: center; color: #fff; font-size: 15px;
 }
 .call-check.on { background: var(--green); border-color: var(--green); }
+.call-check:disabled { cursor: default; }
 .call-item.done .name { color: var(--hint); text-decoration: line-through; }
 .call-tasks { margin: 4px 0 0; padding-left: 16px; font-size: 13px; color: var(--sub); }
 
