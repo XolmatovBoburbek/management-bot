@@ -35,6 +35,7 @@ from app.models import (
     Member,
     Project,
     Task,
+    norm_text,
     normalize_priority,
 )
 
@@ -113,11 +114,20 @@ class Service:
 
     # ---------- команда ----------
     def seed_team(self, path: Path) -> int:
-        if self.db.list_members(include_inactive=True) or not path.exists():
+        """Добавляет из team.yaml тех, кого ещё нет в базе (по нику или имени).
+
+        Уже существующих участников не меняет: их правят в Mini App → «Команда».
+        """
+        if not path.exists():
             return 0
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        existing = self.db.list_members(include_inactive=True)
+        known = {m.username.lower() for m in existing if m.username} | {norm_text(m.name) for m in existing}
         created = []
         for item in data.get("members", []):
+            username = str(item.get("username", "")).lstrip("@").strip().lower()
+            if username in known or norm_text(str(item["name"])) in known:
+                continue
             created.append((item, self.db.upsert_member(
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
                 aliases=str(item.get("aliases", "")), phone=str(item.get("phone", "")),

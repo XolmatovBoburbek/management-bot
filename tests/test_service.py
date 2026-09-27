@@ -345,6 +345,34 @@ async def test_observer_flag_is_saved_from_panel(service):
                                          "active": True}).is_observer
 
 
+def test_team_file_adds_only_new_members(service, tmp_path):
+    pm = member(service, "s_maxhan")
+    sarvar = member(service, "gflwwc")
+    service.save_member(pm, {"id": sarvar.id, "name": "Сарвар", "username": "gflwwc", "role": "Арт-директор",
+                             "active": False})
+    count = len(service.db.list_members(include_inactive=True))
+    assert service.seed_team(service.config.team_file) == 0  # повторный запуск ничего не трогает
+    assert member(service, "gflwwc") is None  # отключённого не возвращает
+    team = tmp_path / "team.yaml"
+    team.write_text("""members:
+  - name: Сарвар
+    username: gflwwc
+    role: Дизайнер
+  - name: Шахзод
+    username: shahzod_new
+  - name: Нодир
+    username: "@Nodir_PM"
+    assists: s_maxhan
+    observer: true
+""", encoding="utf-8")
+    assert service.seed_team(team) == 1
+    members = service.db.list_members(include_inactive=True)
+    assert len(members) == count + 1
+    assert next(m for m in members if m.name == "Сарвар").role == "Арт-директор"
+    nodir = member(service, "nodir_pm")
+    assert nodir.is_observer and nodir.assists_id == pm.id
+
+
 def test_existing_database_gets_new_member_columns(tmp_path):
     import sqlite3
 

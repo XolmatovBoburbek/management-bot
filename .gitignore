@@ -8,3 +8,5 @@ data/
 *.db
 secrets/*
 !secrets/.gitkeep
+.deployed-commit
+.deploy-failed

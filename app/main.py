@@ -34,7 +34,7 @@ async def main() -> None:
     service = Service(db, config, TelegramNotifier(bot), GoogleSheets(config.google_credentials_file))
     seeded = service.seed_team(config.team_file)
     if seeded:
-        log.info("Команда загружена из %s: %s человек", config.team_file, seeded)
+        log.info("Из %s добавлено участников: %s", config.team_file, seeded)
 
     me = await bot.get_me()
     service.bot_username = me.username or ""
