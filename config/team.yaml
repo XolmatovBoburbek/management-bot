@@ -1,0 +1,74 @@
+# Команда IAC Media. При каждом запуске бот добавляет отсюда тех, кого ещё нет в базе (по нику или имени).
+# Уже добавленных участников бот не меняет: их правят в Mini App → «Команда».
+#
+# name      — имя так, как оно пишется в колонке «Ответственный» таблицы
+# username  — Telegram-ник без @ (по нему бот узнаёт человека, когда тот нажмёт /start)
+# aliases   — другие написания имени в таблице через запятую (латиница, фамилия и т.п.)
+# admin     — может загружать таблицы, создавать и редактировать любые задачи
+# pm        — получает эскалации: просрочки, «нужна помощь», утренний список обзвона
+# assists   — ник участника, чьи задачи этот человек выполняет вместе с ним (те же задачи и напоминания)
+# observer  — наблюдатель: видит все задачи и обзвон, получает утреннюю сводку, ничего не меняет
+
+members:
+  - name: Азмиддин
+    username: Gulyamov_330
+    role: Руководитель IAC Media
+    aliases: Azmiddin
+    admin: true
+    pm: true
+
+  - name: Шахзод
+    username: s_maxhan
+    role: Project Manager
+    aliases: Shahzod, Shaxzod
+    admin: true
+    pm: true
+
+  - name: Бабур
+    username: rrkaier
+    role: Помощник PM (Шахзода)
+    aliases: Babur, Бобур
+    assists: s_maxhan   # получает те же задачи и напоминания, что и Шахзод
+    admin: true
+    pm: true
+
+  - name: Мухаммаджон
+    username: Raxmanov7777
+    role: Персонал и подарки
+    aliases: Мухаммаджон Рахманов, Muhammadjon
+
+  - name: Саидмухтор
+    username: saidazizov_ss
+    role: Печатная продакция
+    aliases: Saidmuxtor, Саидмухтар
+
+  - name: Асл
+    username: asl_offf
+    role: Креативный директор
+    aliases: Asl
+
+  - name: Сарвар
+    username: gflwwc
+    role: Дизайнер
+    aliases: Sarvar
+
+  - name: Сардор
+    username: msnuzz
+    role: Коммуникация с ведущими и сценой (stage)
+    aliases: Sardor
+
+  - name: Улугбек
+    username: ngmtvu
+    role: Координатор
+    aliases: Ulugbek
+
+  - name: Абдугофур
+    username: abdugafur_474
+    role: Координатор
+    aliases: Abdugafur, Абдугафур
+
+  - name: Ибрагим
+    username: ik7777777777
+    role: Наблюдатель
+    aliases: Ibragim
+    observer: true
