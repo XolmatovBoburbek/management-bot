@@ -1,4 +1,4 @@
-"""Точка входа: бот (long polling) + веб-сервер Mini App + планировщик в одном процессе."""
+"""Точка входа: бот (long polling) + веб-сервер кабинета + планировщик в одном процессе."""
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +27,7 @@ async def main() -> None:
     if not config.bot_token:
         raise SystemExit("BOT_TOKEN не задан. Скопируйте .env.example в .env и впишите токен от @BotFather.")
     if not config.webapp_url.startswith("https://"):
-        log.warning("WEBAPP_URL не задан или не https — кнопка Mini App не появится (бот работает и без неё).")
+        log.warning("WEBAPP_URL не задан или не https — кнопка кабинета в Telegram не появится (бот работает и без неё).")
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     db = Database(config.db_path, config.tz)
@@ -35,6 +35,9 @@ async def main() -> None:
     seeded = service.seed_team(config.team_file)
     if seeded:
         log.info("Из %s добавлено участников: %s", config.team_file, seeded)
+    accounts = service.accounts.bootstrap()
+    if accounts:
+        log.info("Созданы аккаунты кабинета для команды: %s (вход из Telegram; пароли задаёт администратор)", accounts)
 
     me = await bot.get_me()
     service.bot_username = me.username or ""
@@ -44,7 +47,7 @@ async def main() -> None:
     runner = web.AppRunner(create_app(service))
     await runner.setup()
     await web.TCPSite(runner, config.host, config.port).start()
-    log.info("Mini App: http://%s:%s (публичный адрес: %s)", config.host, config.port, config.webapp_url or "—")
+    log.info("Кабинет: http://%s:%s (публичный адрес: %s)", config.host, config.port, config.webapp_url or "—")
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(build_router(service))

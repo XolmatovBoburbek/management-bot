@@ -102,6 +102,7 @@ server {
         proxy_pass http://127.0.0.1:${LOCAL_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 }
 

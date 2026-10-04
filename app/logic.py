@@ -82,7 +82,8 @@ class Team:
         return self.match(task.responsible)[0]
 
     def tasks_of(self, member: Member, tasks: list[Task]) -> list[Task]:
-        return [t for t in tasks if member in self.assignees(t)]
+        # по id: веб-кабинет передаёт копию участника с правами из роли в пространстве
+        return [t for t in tasks if any(m.id == member.id for m in self.assignees(t))]
 
 
 def bucket(task: Task, today: date) -> str:

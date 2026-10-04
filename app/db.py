@@ -13,9 +13,12 @@ from app.models import (
     Call,
     Member,
     Milestone,
+    Page,
     Project,
     Risk,
     Task,
+    User,
+    Workspace,
     dumps,
     from_iso,
     norm_text,
@@ -53,7 +56,8 @@ CREATE TABLE IF NOT EXISTS projects (
     last_sync_error TEXT,
     archived INTEGER DEFAULT 0,
     created_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    workspace_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY,
@@ -89,7 +93,8 @@ CREATE TABLE IF NOT EXISTS task_events (
     member_id INTEGER,
     kind TEXT NOT NULL,
     text TEXT DEFAULT '',
-    created_at TEXT
+    created_at TEXT,
+    actor_name TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id);
 CREATE TABLE IF NOT EXISTS milestones (
@@ -136,6 +141,7 @@ CREATE TABLE IF NOT EXISTS call_checks (
     member_id INTEGER,
     note TEXT DEFAULT '',
     created_at TEXT,
+    actor_name TEXT DEFAULT '',
     PRIMARY KEY (project_id, day, key)
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -146,6 +152,55 @@ CREATE TABLE IF NOT EXISTS notification_log (
     key TEXT PRIMARY KEY,
     sent_at TEXT
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    icon TEXT DEFAULT '',
+    created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    login TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    password_hash TEXT DEFAULT '',
+    must_change_password INTEGER DEFAULT 0,
+    is_superadmin INTEGER DEFAULT 0,
+    member_id INTEGER UNIQUE,
+    active INTEGER DEFAULT 1,
+    created_at TEXT,
+    last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS workspace_users (
+    workspace_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    PRIMARY KEY (workspace_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    kind TEXT DEFAULT 'password',
+    created_at TEXT,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pages (
+    id INTEGER PRIMARY KEY,
+    workspace_id INTEGER NOT NULL,
+    parent_id INTEGER,
+    title TEXT DEFAULT '',
+    icon TEXT DEFAULT '',
+    content_json TEXT DEFAULT '[]',
+    text_index TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    version INTEGER DEFAULT 1,
+    archived INTEGER DEFAULT 0,
+    archived_at TEXT,
+    created_by TEXT DEFAULT '',
+    updated_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pages_workspace ON pages(workspace_id, archived);
 """
 
 # Поля, которые можно менять и в таблице, и в боте. При повторном импорте
@@ -222,6 +277,40 @@ def _project_from_row(row: sqlite3.Row) -> Project:
         last_sync_error=row["last_sync_error"],
         archived=bool(row["archived"]),
         updated_at=row["updated_at"],
+        workspace_id=row["workspace_id"],
+    )
+
+
+def _user_from_row(row: sqlite3.Row) -> User:
+    return User(
+        id=row["id"],
+        login=row["login"],
+        name=row["name"],
+        password_hash=row["password_hash"] or "",
+        must_change_password=bool(row["must_change_password"]),
+        is_superadmin=bool(row["is_superadmin"]),
+        member_id=row["member_id"],
+        active=bool(row["active"]),
+        last_login_at=row["last_login_at"],
+    )
+
+
+def _page_from_row(row: sqlite3.Row) -> Page:
+    keys = row.keys()
+    return Page(
+        id=row["id"],
+        workspace_id=row["workspace_id"],
+        parent_id=row["parent_id"],
+        title=row["title"] or "",
+        icon=row["icon"] or "",
+        content=json.loads(row["content_json"] or "[]") if "content_json" in keys else [],
+        sort_order=row["sort_order"] or 0,
+        version=row["version"] or 1,
+        archived=bool(row["archived"]),
+        created_by=row["created_by"] or "",
+        updated_by=row["updated_by"] or "",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -282,6 +371,14 @@ class Database:
             self.conn.execute("ALTER TABLE members ADD COLUMN assists_id INTEGER")
         if "is_observer" not in columns:
             self.conn.execute("ALTER TABLE members ADD COLUMN is_observer INTEGER DEFAULT 0")
+        for table, column, ddl in (
+            ("projects", "workspace_id", "INTEGER"),
+            ("task_events", "actor_name", "TEXT DEFAULT ''"),
+            ("call_checks", "actor_name", "TEXT DEFAULT ''"),
+        ):
+            if column not in {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)")
 
     def close(self) -> None:
         self.conn.close()
@@ -376,9 +473,15 @@ class Database:
         self.conn.commit()
 
     # ---------- проекты ----------
-    def list_projects(self, include_archived: bool = False) -> list[Project]:
-        sql = "SELECT * FROM projects" + ("" if include_archived else " WHERE archived = 0") + " ORDER BY updated_at DESC"
-        return [_project_from_row(r) for r in self.conn.execute(sql)]
+    def list_projects(self, include_archived: bool = False, workspace_id: int | None = None) -> list[Project]:
+        where, args = [], []
+        if not include_archived:
+            where.append("archived = 0")
+        if workspace_id is not None:
+            where.append("workspace_id = ?")
+            args.append(workspace_id)
+        sql = "SELECT * FROM projects" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY updated_at DESC"
+        return [_project_from_row(r) for r in self.conn.execute(sql, args)]
 
     def get_project(self, project_id: int) -> Project | None:
         row = self.conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
@@ -388,22 +491,26 @@ class Database:
         row = self.conn.execute("SELECT * FROM projects WHERE code = ?", (code,)).fetchone()
         return _project_from_row(row) if row else None
 
-    def create_project(self, name: str, code: str, event_date: date | None = None) -> Project:
+    def create_project(self, name: str, code: str, event_date: date | None = None,
+                       workspace_id: int | None = None) -> Project:
         now = self._now_iso()
         base, n = code, 1
         while self.project_by_code(code):
             n += 1
             code = f"{base}_{n}"
+        if workspace_id is None:
+            default = self.default_workspace()
+            workspace_id = default.id if default else None
         cur = self.conn.execute(
-            "INSERT INTO projects(code, name, event_date, created_at, updated_at) VALUES(?,?,?,?,?)",
-            (code, name, to_iso(event_date), now, now),
+            "INSERT INTO projects(code, name, event_date, workspace_id, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+            (code, name, to_iso(event_date), workspace_id, now, now),
         )
         self.conn.commit()
         return self.get_project(cur.lastrowid)  # type: ignore[return-value]
 
     def update_project(self, project_id: int, **fields: object) -> Project:
         allowed = {"name", "event_date", "source_type", "source_url", "file_path", "last_sync_at",
-                   "last_sync_error", "archived", "info", "layout", "sheet_values"}
+                   "last_sync_error", "archived", "info", "layout", "sheet_values", "workspace_id"}
         sets, values = [], []
         for key, value in fields.items():
             if key not in allowed:
@@ -467,25 +574,35 @@ class Database:
         self.conn.commit()
         return self.get_task(task_id)  # type: ignore[return-value]
 
-    def add_event(self, task_id: int, kind: str, text: str = "", member_id: int | None = None) -> None:
+    def add_event(self, task_id: int, kind: str, text: str = "", member_id: int | None = None,
+                  actor_name: str = "") -> None:
+        # Отрицательный id — аккаунт веб-кабинета без связи с участником команды: имя пишем текстом.
         self.conn.execute(
-            "INSERT INTO task_events(task_id, member_id, kind, text, created_at) VALUES(?,?,?,?,?)",
-            (task_id, member_id, kind, text, self._now_iso()),
+            "INSERT INTO task_events(task_id, member_id, kind, text, created_at, actor_name) VALUES(?,?,?,?,?,?)",
+            (task_id, member_id if member_id and member_id > 0 else None, kind, text, self._now_iso(), actor_name),
         )
         self.conn.commit()
 
     def task_events(self, task_id: int, limit: int = 50) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT e.*, m.name AS member_name FROM task_events e LEFT JOIN members m ON m.id = e.member_id "
+            "SELECT e.*, COALESCE(m.name, NULLIF(e.actor_name, '')) AS member_name FROM task_events e "
+            "LEFT JOIN members m ON m.id = e.member_id "
             "WHERE e.task_id = ? ORDER BY e.id DESC LIMIT ?",
             (task_id, limit),
         )
         return [dict(r) for r in rows]
 
+    def comment_counts(self, project_id: int) -> dict[int, int]:
+        rows = self.conn.execute(
+            "SELECT e.task_id, COUNT(*) AS n FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE t.project_id = ? AND e.kind IN ('comment', 'problem') GROUP BY e.task_id", (project_id,))
+        return {r["task_id"]: r["n"] for r in rows}
+
     def events_since(self, project_id: int, since_iso: str, kinds: tuple[str, ...]) -> list[dict]:
         marks = ",".join("?" * len(kinds))
         rows = self.conn.execute(
-            f"SELECT e.*, t.title AS task_title, m.name AS member_name FROM task_events e "
+            f"SELECT e.*, t.title AS task_title, COALESCE(m.name, NULLIF(e.actor_name, '')) AS member_name "
+            f"FROM task_events e "
             f"JOIN tasks t ON t.id = e.task_id LEFT JOIN members m ON m.id = e.member_id "
             f"WHERE t.project_id = ? AND e.created_at >= ? AND e.kind IN ({marks}) ORDER BY e.id",
             (project_id, since_iso, *kinds),
@@ -495,7 +612,8 @@ class Database:
     def comment_lines(self, project_id: int) -> dict[int, list[str]]:
         """Комментарии из бота в формате строки для колонки «Комментарии исполнителя»."""
         rows = self.conn.execute(
-            "SELECT e.task_id, e.text, e.created_at, e.kind, m.name AS member_name FROM task_events e "
+            "SELECT e.task_id, e.text, e.created_at, e.kind, COALESCE(m.name, NULLIF(e.actor_name, '')) AS member_name "
+            "FROM task_events e "
             "JOIN tasks t ON t.id = e.task_id LEFT JOIN members m ON m.id = e.member_id "
             "WHERE t.project_id = ? AND e.kind IN ('comment', 'problem') ORDER BY e.id",
             (project_id,),
@@ -509,11 +627,12 @@ class Database:
 
     # ---------- импорт ----------
     def apply_import(self, parsed: ParsedWorkbook, *, file_path: str | None, source_type: str,
-                     source_url: str | None = None, project_id: int | None = None) -> ImportResult:
+                     source_url: str | None = None, project_id: int | None = None,
+                     workspace_id: int | None = None) -> ImportResult:
         project = self.get_project(project_id) if project_id else self.project_by_code(parsed.code)
         created = project is None
         if project is None:
-            project = self.create_project(parsed.name, parsed.code, parsed.event_date)
+            project = self.create_project(parsed.name, parsed.code, parsed.event_date, workspace_id)
         result = ImportResult(project, created)
 
         # Дата мероприятия: тот же merge, что и для задач.
@@ -677,21 +796,220 @@ class Database:
 
     def call_checks(self, project_id: int, day: date) -> dict[str, dict]:
         rows = self.conn.execute(
-            "SELECT c.*, m.name AS member_name FROM call_checks c LEFT JOIN members m ON m.id = c.member_id "
+            "SELECT c.*, COALESCE(m.name, NULLIF(c.actor_name, '')) AS member_name FROM call_checks c "
+            "LEFT JOIN members m ON m.id = c.member_id "
             "WHERE c.project_id = ? AND c.day = ?",
             (project_id, day.isoformat()),
         )
         return {r["key"]: dict(r) for r in rows}
 
     def set_call_check(self, project_id: int, day: date, key: str, member_id: int | None, note: str,
-                       checked: bool) -> None:
+                       checked: bool, actor_name: str = "") -> None:
         if checked:
             self.conn.execute(
-                "INSERT INTO call_checks(project_id, day, key, member_id, note, created_at) VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(project_id, day, key) DO UPDATE SET note = excluded.note, member_id = excluded.member_id",
-                (project_id, day.isoformat(), key, member_id, note, self._now_iso()),
+                "INSERT INTO call_checks(project_id, day, key, member_id, note, created_at, actor_name) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id, day, key) DO UPDATE SET note = excluded.note, "
+                "member_id = excluded.member_id, actor_name = excluded.actor_name",
+                (project_id, day.isoformat(), key, member_id if member_id and member_id > 0 else None, note,
+                 self._now_iso(), actor_name),
             )
         else:
             self.conn.execute("DELETE FROM call_checks WHERE project_id = ? AND day = ? AND key = ?",
                               (project_id, day.isoformat(), key))
         self.conn.commit()
+
+    # ---------- пространства ----------
+    def create_workspace(self, name: str, icon: str = "") -> Workspace:
+        cur = self.conn.execute("INSERT INTO workspaces(name, icon, created_at) VALUES(?,?,?)",
+                                (name, icon, self._now_iso()))
+        self.conn.commit()
+        return self.get_workspace(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_workspace(self, workspace_id: int) -> Workspace | None:
+        row = self.conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
+        return Workspace(id=row["id"], name=row["name"], icon=row["icon"] or "") if row else None
+
+    def list_workspaces(self) -> list[Workspace]:
+        rows = self.conn.execute("SELECT * FROM workspaces ORDER BY id")
+        return [Workspace(id=r["id"], name=r["name"], icon=r["icon"] or "") for r in rows]
+
+    def default_workspace(self) -> Workspace | None:
+        """Сюда попадают проекты, загруженные через бота, и проекты из версий до пространств."""
+        row = self.conn.execute("SELECT id FROM workspaces ORDER BY id LIMIT 1").fetchone()
+        return self.get_workspace(row["id"]) if row else None
+
+    def update_workspace(self, workspace_id: int, *, name: str, icon: str) -> Workspace:
+        self.conn.execute("UPDATE workspaces SET name = ?, icon = ? WHERE id = ?", (name, icon, workspace_id))
+        self.conn.commit()
+        return self.get_workspace(workspace_id)  # type: ignore[return-value]
+
+    def assign_orphan_projects(self, workspace_id: int) -> int:
+        cur = self.conn.execute("UPDATE projects SET workspace_id = ? WHERE workspace_id IS NULL", (workspace_id,))
+        self.conn.commit()
+        return cur.rowcount
+
+    # ---------- аккаунты ----------
+    def create_user(self, *, login: str, name: str, password_hash: str = "", must_change_password: bool = False,
+                    is_superadmin: bool = False, member_id: int | None = None) -> User:
+        cur = self.conn.execute(
+            "INSERT INTO users(login, name, password_hash, must_change_password, is_superadmin, member_id, active, "
+            "created_at) VALUES(?,?,?,?,?,?,1,?)",
+            (login, name, password_hash, int(must_change_password), int(is_superadmin), member_id, self._now_iso()),
+        )
+        self.conn.commit()
+        return self.get_user(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_user(self, user_id: int) -> User | None:
+        row = self.conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return _user_from_row(row) if row else None
+
+    def user_by_login(self, login: str) -> User | None:
+        row = self.conn.execute("SELECT * FROM users WHERE login = ?", (login.strip().lower(),)).fetchone()
+        return _user_from_row(row) if row else None
+
+    def user_by_member(self, member_id: int) -> User | None:
+        row = self.conn.execute("SELECT * FROM users WHERE member_id = ?", (member_id,)).fetchone()
+        return _user_from_row(row) if row else None
+
+    def list_users(self) -> list[User]:
+        return [_user_from_row(r) for r in self.conn.execute("SELECT * FROM users ORDER BY id")]
+
+    def count_users(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+
+    def update_user(self, user_id: int, **fields: object) -> User:
+        allowed = {"login", "name", "password_hash", "must_change_password", "is_superadmin", "member_id", "active",
+                   "last_login_at"}
+        sets, values = [], []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"unknown user field {key}")
+            if key in {"must_change_password", "is_superadmin", "active"}:
+                value = int(bool(value))
+            sets.append(f"{key} = ?")
+            values.append(value)
+        if sets:
+            self.conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", (*values, user_id))
+            self.conn.commit()
+        return self.get_user(user_id)  # type: ignore[return-value]
+
+    def set_role(self, workspace_id: int, user_id: int, role: str | None) -> None:
+        if role is None:
+            self.conn.execute("DELETE FROM workspace_users WHERE workspace_id = ? AND user_id = ?",
+                              (workspace_id, user_id))
+        else:
+            self.conn.execute(
+                "INSERT INTO workspace_users(workspace_id, user_id, role) VALUES(?,?,?) "
+                "ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role",
+                (workspace_id, user_id, role),
+            )
+        self.conn.commit()
+
+    def user_roles(self, user_id: int) -> dict[int, str]:
+        rows = self.conn.execute("SELECT workspace_id, role FROM workspace_users WHERE user_id = ?", (user_id,))
+        return {r["workspace_id"]: r["role"] for r in rows}
+
+    def workspace_roles(self, workspace_id: int) -> dict[int, str]:
+        rows = self.conn.execute("SELECT user_id, role FROM workspace_users WHERE workspace_id = ?", (workspace_id,))
+        return {r["user_id"]: r["role"] for r in rows}
+
+    # ---------- сессии ----------
+    def create_session(self, token_hash: str, user_id: int, kind: str, expires_at: datetime) -> None:
+        self.conn.execute(
+            "INSERT INTO sessions(token_hash, user_id, kind, created_at, expires_at) VALUES(?,?,?,?,?)",
+            (token_hash, user_id, kind, self._now_iso(), _utc_iso(expires_at)),
+        )
+        self.conn.commit()
+
+    def get_session(self, token_hash: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                                (token_hash, self._now_iso())).fetchone()
+        return dict(row) if row else None
+
+    def extend_session(self, token_hash: str, expires_at: datetime) -> None:
+        self.conn.execute("UPDATE sessions SET expires_at = ? WHERE token_hash = ?", (_utc_iso(expires_at), token_hash))
+        self.conn.commit()
+
+    def delete_session(self, token_hash: str) -> None:
+        self.conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+        self.conn.commit()
+
+    def delete_user_sessions(self, user_id: int, kind: str | None = None, keep: str | None = None) -> None:
+        sql, args = "DELETE FROM sessions WHERE user_id = ?", [user_id]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        if keep:
+            sql += " AND token_hash != ?"
+            args.append(keep)
+        self.conn.execute(sql, args)
+        self.conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (self._now_iso(),))
+        self.conn.commit()
+
+    # ---------- страницы ----------
+    _PAGE_META = ("id, workspace_id, parent_id, title, icon, sort_order, version, archived, created_by, updated_by, "
+                  "created_at, updated_at")
+
+    def create_page(self, workspace_id: int, *, title: str = "", parent_id: int | None = None, icon: str = "",
+                    content: list | None = None, text_index: str = "", author: str = "") -> Page:
+        now = self._now_iso()
+        order = self.conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM pages WHERE workspace_id = ?",
+                                  (workspace_id,)).fetchone()["m"] + 1
+        cur = self.conn.execute(
+            "INSERT INTO pages(workspace_id, parent_id, title, icon, content_json, text_index, sort_order, created_by, "
+            "updated_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (workspace_id, parent_id, title, icon, dumps(content or []), text_index, order, author, author, now, now),
+        )
+        self.conn.commit()
+        return self.get_page(cur.lastrowid)  # type: ignore[return-value]
+
+    def get_page(self, page_id: int) -> Page | None:
+        row = self.conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
+        return _page_from_row(row) if row else None
+
+    def list_pages(self, workspace_id: int, archived: bool = False) -> list[Page]:
+        rows = self.conn.execute(f"SELECT {self._PAGE_META} FROM pages WHERE workspace_id = ? AND archived = ? "
+                                 "ORDER BY sort_order, id", (workspace_id, int(archived)))
+        return [_page_from_row(r) for r in rows]
+
+    def update_page(self, page_id: int, *, author: str, **fields: object) -> Page:
+        allowed = {"title", "icon", "content", "text_index", "parent_id", "sort_order"}
+        sets, values = [], []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"unknown page field {key}")
+            if key == "content":
+                key, value = "content_json", dumps(value)
+            sets.append(f"{key} = ?")
+            values.append(value)
+        sets += ["version = version + 1", "updated_by = ?", "updated_at = ?"]
+        values += [author, self._now_iso()]
+        self.conn.execute(f"UPDATE pages SET {', '.join(sets)} WHERE id = ?", (*values, page_id))
+        self.conn.commit()
+        return self.get_page(page_id)  # type: ignore[return-value]
+
+    def page_subtree(self, page_id: int) -> list[int]:
+        rows = self.conn.execute(
+            "WITH RECURSIVE sub(id) AS (SELECT ? UNION SELECT p.id FROM pages p JOIN sub ON p.parent_id = sub.id) "
+            "SELECT id FROM sub", (page_id,))
+        return [r["id"] for r in rows]
+
+    def set_pages_archived(self, page_ids: list[int], archived: bool) -> None:
+        marks = ",".join("?" * len(page_ids))
+        self.conn.execute(f"UPDATE pages SET archived = ?, archived_at = ? WHERE id IN ({marks})",
+                          (int(archived), self._now_iso() if archived else None, *page_ids))
+        self.conn.commit()
+
+    def delete_pages(self, page_ids: list[int]) -> None:
+        marks = ",".join("?" * len(page_ids))
+        self.conn.execute(f"DELETE FROM pages WHERE id IN ({marks})", page_ids)
+        self.conn.commit()
+
+    def search_pages(self, workspace_id: int, query: str, limit: int = 20) -> list[Page]:
+        # SQLite lower() не знает кириллицу, поэтому text_index хранится уже нормализованным (заголовок + текст).
+        like = "%" + norm_text(query).replace("\\", "").replace("%", "").replace("_", "") + "%"
+        rows = self.conn.execute(
+            f"SELECT {self._PAGE_META} FROM pages WHERE workspace_id = ? AND archived = 0 "
+            "AND text_index LIKE ? ORDER BY updated_at DESC LIMIT ?",
+            (workspace_id, like, limit))
+        return [_page_from_row(r) for r in rows]

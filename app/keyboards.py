@@ -78,7 +78,7 @@ def call_actions(call_id: int) -> InlineKeyboardMarkup:
 
 def pm_actions(webapp_url: str) -> InlineKeyboardMarkup | None:
     buttons = [
-        app_button(webapp_url, "📊 Панель", "?tab=home"),
+        app_button(webapp_url, "📊 Кабинет", "?tab=home"),
         app_button(webapp_url, "📞 Обзвон", "?tab=calls"),
     ]
     buttons = [b for b in buttons if b]

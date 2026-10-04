@@ -108,7 +108,7 @@ def clock() -> Clock:
 def config(tmp_path) -> Config:
     return Config(
         bot_token=TOKEN, webapp_url="https://pm.example.com", host="127.0.0.1", port=0, data_dir=tmp_path,
-        tz=TZ, team_file=ROOT / "config" / "team.yaml", google_credentials_file=None, dev_auth_username=None,
+        tz=TZ, team_file=ROOT / "config" / "team.yaml", google_credentials_file=None,
     )
 
 

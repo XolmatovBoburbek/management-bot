@@ -1,6 +1,6 @@
 """Сценарии приложения: всё, что меняет данные и рассылает уведомления.
 
-И бот, и Mini App, и планировщик вызывают только этот слой — поэтому правила
+И бот, и кабинет, и планировщик вызывают только этот слой — поэтому правила
 (кто что может менять, кого уведомлять, что писать обратно в таблицу) живут в одном месте.
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ import yaml
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import keyboards, logic, texts
+from app.accounts import Accounts
 from app.config import Config
 from app.dates import parse_date
 from app.db import Database, ImportResult
@@ -31,6 +32,7 @@ from app.models import (
     PROGRESS,
     STATUS_LABELS,
     TODO,
+    AccessError,
     Call,
     Member,
     Project,
@@ -38,6 +40,7 @@ from app.models import (
     norm_text,
     normalize_priority,
 )
+from app.pages import Pages
 
 log = logging.getLogger(__name__)
 
@@ -63,10 +66,6 @@ class Notifier(Protocol):
     async def send_document(self, chat_id: int, data: bytes, filename: str, caption: str = "") -> bool: ...
 
 
-class AccessError(PermissionError):
-    pass
-
-
 class Service:
     def __init__(self, db: Database, config: Config, notifier: Notifier, sheets: GoogleSheets | None = None,
                  clock=None):
@@ -79,6 +78,8 @@ class Service:
             db.clock = clock
         self.bot_username = ""
         self._write_queue: asyncio.Queue | None = None
+        self.accounts = Accounts(db, self.now)
+        self.pages = Pages(db)
 
     # ---------- время и настройки ----------
     def now(self) -> datetime:
@@ -116,7 +117,7 @@ class Service:
     def seed_team(self, path: Path) -> int:
         """Добавляет из team.yaml тех, кого ещё нет в базе (по нику или имени).
 
-        Уже существующих участников не меняет: их правят в Mini App → «Команда».
+        Уже существующих участников не меняет: их правят в кабинете → «Команда».
         """
         if not path.exists():
             return 0
@@ -180,27 +181,31 @@ class Service:
     def can_edit(self, actor: Member | None, task: Task) -> bool:
         if not actor:
             return False
-        return actor.is_admin or actor in self.team().assignees(task)
+        return actor.is_admin or actor.id in {m.id for m in self.team().assignees(task)}
+
+    def _event(self, task_id: int, kind: str, text: str, actor: Member) -> None:
+        self.db.add_event(task_id, kind, text, actor.id, actor.name)
 
     def require_task_access(self, actor: Member | None, task: Task) -> None:
         if not self.can_edit(actor, task):
             raise AccessError("Это не ваша задача — менять её может ответственный или администратор")
 
     # ---------- проекты ----------
-    def projects(self) -> list[Project]:
-        return self.db.list_projects()
+    def projects(self, workspace_id: int | None = None) -> list[Project]:
+        return self.db.list_projects(workspace_id=workspace_id)
 
     def default_project(self) -> Project | None:
         projects = self.projects()
         return projects[0] if projects else None
 
-    def create_project(self, actor: Member, name: str, event_date: date | None) -> Project:
+    def create_project(self, actor: Member, name: str, event_date: date | None,
+                       workspace_id: int | None = None) -> Project:
         self._require_admin(actor)
         name = name.strip()
         if not name:
             raise ValueError("Укажите название проекта")
         code = re.sub(r"[^\w]+", "_", name, flags=re.UNICODE).strip("_").upper()[:40] or "PROJECT"
-        return self.db.create_project(name, code, event_date)
+        return self.db.create_project(name, code, event_date, workspace_id)
 
     def update_project(self, actor: Member, project: Project, **fields) -> Project:
         self._require_admin(actor)
@@ -208,18 +213,25 @@ class Service:
         return self.db.update_project(project.id, **allowed)
 
     async def import_file(self, data: bytes, filename: str, actor: Member | None, *, source_type: str = "upload",
-                          source_url: str | None = None,
-                          project_id: int | None = None) -> tuple[ImportResult, ParsedWorkbook, list[dict]]:
+                          source_url: str | None = None, project_id: int | None = None,
+                          workspace_id: int | None = None) -> tuple[ImportResult, ParsedWorkbook, list[dict]]:
         if actor is not None:
             self._require_admin(actor)
         parsed = parse_workbook(data, fallback_name=Path(filename).stem)
+        if workspace_id is not None and project_id is None:
+            existing = self.db.project_by_code(parsed.code)
+            if existing and existing.workspace_id != workspace_id:
+                other = self.db.get_workspace(existing.workspace_id) if existing.workspace_id else None
+                raise ValueError(f"Проект с кодом {parsed.code} уже есть в пространстве "
+                                 f"«{other.name if other else '—'}». Загрузите таблицу там или поменяйте код проекта "
+                                 "на листе «Информация о проекте».")
         uploads = self.config.uploads_dir
         uploads.mkdir(parents=True, exist_ok=True)
         safe_code = re.sub(r"[^\w-]+", "_", parsed.code)[:40]
         path = uploads / f"{safe_code}_{self.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
         path.write_bytes(data)
         result = self.db.apply_import(parsed, file_path=str(path), source_type=source_type,
-                                      source_url=source_url, project_id=project_id)
+                                      source_url=source_url, project_id=project_id, workspace_id=workspace_id)
         self._cleanup_uploads(safe_code)
         project = result.project
         audit = logic.audit(project, self.db.list_tasks(project.id), self.team(),
@@ -232,10 +244,12 @@ class Service:
         for old in files[:-KEEP_UPLOADS]:
             old.unlink(missing_ok=True)
 
-    async def connect_sheet(self, url: str, actor: Member) -> tuple[ImportResult, ParsedWorkbook, list[dict]]:
+    async def connect_sheet(self, url: str, actor: Member,
+                            workspace_id: int | None = None) -> tuple[ImportResult, ParsedWorkbook, list[dict]]:
         self._require_admin(actor)
         data = await self.sheets.download(url)
-        return await self.import_file(data, "google_sheet.xlsx", actor, source_type="gsheet", source_url=url)
+        return await self.import_file(data, "google_sheet.xlsx", actor, source_type="gsheet", source_url=url,
+                                      workspace_id=workspace_id)
 
     async def sync_project(self, project: Project) -> tuple[ImportResult, ParsedWorkbook, list[dict]]:
         if project.source_type != "gsheet" or not project.source_url:
@@ -286,7 +300,7 @@ class Service:
         if status == CANCELLED:
             fields.update(blocked=False, blocked_reason="")
         updated = self.db.update_task(task.id, **fields)
-        self.db.add_event(task.id, "status", STATUS_LABELS[status], actor.id)
+        self._event(task.id, "status", STATUS_LABELS[status], actor)
         if status in DONE_STATUSES and task.status not in DONE_STATUSES:
             late = " (с просрочкой)" if status == DONE_LATE else ""
             await self._to_group(f"✅ {texts.e(actor.mention)} закрыл(а) «{texts.e(task.title)}»{late}")
@@ -298,14 +312,14 @@ class Service:
         text = text.strip()
         if not text:
             raise ValueError("Пустой комментарий")
-        self.db.add_event(task.id, "comment", text[:2000], actor.id)
+        self._event(task.id, "comment", text[:2000], actor)
         self._queue_write(task)
 
     async def report_problem(self, task: Task, text: str, actor: Member) -> Task:
         self.require_task_access(actor, task)
         text = text.strip() or "нужна помощь"
         updated = self.db.update_task(task.id, blocked=True, blocked_reason=text[:500])
-        self.db.add_event(task.id, "problem", text[:2000], actor.id)
+        self._event(task.id, "problem", text[:2000], actor)
         today = self.today()
         message = (f"🆘 <b>{texts.e(actor.name)}</b> просит помощи\n\n"
                    f"{texts.task_line(updated, today)}\n\n💬 {texts.e(text)}")
@@ -322,19 +336,19 @@ class Service:
 
     async def resolve_problem(self, task: Task, actor: Member) -> Task:
         self.require_task_access(actor, task)
-        self.db.add_event(task.id, "resolved", "блокер снят", actor.id)
+        self._event(task.id, "resolved", "блокер снят", actor)
         return self.db.update_task(task.id, blocked=False, blocked_reason="")
 
     async def confirm_on_track(self, task: Task, actor: Member) -> None:
         self.require_task_access(actor, task)
-        self.db.add_event(task.id, "checkin", "успевает к сроку", actor.id)
+        self._event(task.id, "checkin", "успевает к сроку", actor)
 
     async def set_eta(self, task: Task, days: int, actor: Member) -> Task:
         self.require_task_access(actor, task)
         eta = self.today() + timedelta(days=days)
         if task.status == TODO:
             self.db.update_task(task.id, status=PROGRESS)
-        self.db.add_event(task.id, "eta", f"обещает закрыть к {eta.strftime('%d.%m')}", actor.id)
+        self._event(task.id, "eta", f"обещает закрыть к {eta.strftime('%d.%m')}", actor)
         return self.db.update_task(task.id, eta=eta)
 
     def _clean_fields(self, data: dict) -> dict:
@@ -365,7 +379,7 @@ class Service:
             raise ValueError("Укажите название задачи")
         status = fields.pop("status", TODO)
         task = self.db.create_task(project.id, status=status, **fields)
-        self.db.add_event(task.id, "created", "задача создана в боте", actor.id)
+        self._event(task.id, "created", "задача создана в боте", actor)
         await self._notify_new_task(task, actor)
         self._queue_write(task)
         return task
@@ -379,7 +393,7 @@ class Service:
             return task
         updated = self.db.update_task(task.id, **{k: fields[k] for k in changes})
         if changes:
-            self.db.add_event(task.id, "edit", "изменено: " + ", ".join(changes), actor.id)
+            self._event(task.id, "edit", "изменено: " + ", ".join(changes), actor)
         if status and status != task.status:
             updated = await self.set_status(updated, status, actor)
         team = self.team()
@@ -404,7 +418,7 @@ class Service:
     async def archive_task(self, task: Task, actor: Member) -> None:
         self._require_admin(actor)
         self.db.update_task(task.id, archived=True)
-        self.db.add_event(task.id, "archived", "задача удалена", actor.id)
+        self._event(task.id, "archived", "задача удалена", actor)
 
     def parse_quick_add(self, text: str) -> dict:
         """`/add @user 30.09 ! Название` → поля задачи. Порядок частей произвольный."""
@@ -439,7 +453,7 @@ class Service:
                 continue
             deadline = date.fromisoformat(item["deadline"])
             updated = self.db.update_task(task.id, deadline=deadline)
-            self.db.add_event(task.id, "edit", f"срок из черновика плана: {deadline.strftime('%d.%m')}", actor.id)
+            self._event(task.id, "edit", f"срок из черновика плана: {deadline.strftime('%d.%m')}", actor)
             self._queue_write(updated)
             applied += 1
         return applied
@@ -456,7 +470,7 @@ class Service:
     def check_call_item(self, project: Project, key: str, actor: Member, note: str = "", checked: bool = True) -> None:
         if actor.is_observer and not actor.is_admin:
             raise AccessError("Наблюдатель только просматривает обзвон")
-        self.db.set_call_check(project.id, self.today(), key, actor.id, note.strip()[:500], checked)
+        self.db.set_call_check(project.id, self.today(), key, actor.id, note.strip()[:500], checked, actor.name)
         if checked and key.startswith("call:"):
             call = self.db.get_call(int(key.split(":", 1)[1]))
             if call and call.status == "planned":
@@ -481,8 +495,7 @@ class Service:
                                    phone=str(data.get("phone", "")).strip(), note=str(data.get("note", "")).strip(),
                                    created_by=actor.id)
         if task_id:
-            self.db.add_event(task_id, "call", f"запланирован звонок: {contact} {due_at.strftime('%d.%m %H:%M')}",
-                              actor.id)
+            self._event(task_id, "call", f"запланирован звонок: {contact} {due_at.strftime('%d.%m %H:%M')}", actor)
         return call
 
     async def finish_call(self, call: Call, actor: Member, result: str = "") -> Call:
@@ -490,8 +503,7 @@ class Service:
             self._require_admin(actor)
         call = self.db.update_call(call.id, status="done", result=result.strip()[:500], done_at=self.now())
         if call.task_id:
-            self.db.add_event(call.task_id, "call", f"созвонились: {call.contact}" + (f" — {result}" if result else ""),
-                              actor.id)
+            self._event(call.task_id, "call", f"созвонились: {call.contact}" + (f" — {result}" if result else ""), actor)
         return call
 
     async def snooze_call(self, call: Call, until: datetime) -> Call:

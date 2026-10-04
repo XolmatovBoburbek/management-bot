@@ -1,1028 +1,1373 @@
 "use strict";
+/* Каркас кабинета в стиле Notion: вход, боковая панель, маршруты, главная, «Мои задачи», страницы,
+ * поиск, корзина, импорт проектов и администрирование (доступ, команда, напоминания). */
 
-const tg = window.Telegram && window.Telegram.WebApp;
-const inTelegram = !!(tg && tg.initData);
-if (inTelegram) document.documentElement.classList.add("tg");
-
-const STATUS_SHORT = {
-  todo: "не начата", progress: "в работе", done: "выполнена", done_late: "выполнена с просрочкой",
-  overdue: "просрочена", cancelled: "отменена",
+const VIEW_HANDLERS = {
+  home: viewHome,
+  my: viewMy,
+  project: viewProject,
+  page: viewPage,
+  trash: viewTrash,
+  import: viewImport,
+  admin: viewAdmin,
+  team: viewTeam,
+  reminders: viewReminders,
+  account: viewAccount,
 };
-const STATUS_OPTIONS = [
-  ["todo", "задача не начата"], ["progress", "в процессе работы"], ["done", "выполнена"],
-  ["done_late", "выполнена с просрочкой"], ["cancelled", "отменена"],
-];
-const PRIORITIES = ["Критично", "Высокий", "Средний", "Низкий"];
-const PRIO_CLASS = { "Критично": "p-crit", "Высокий": "p-high", "Средний": "p-med", "Низкий": "p-low" };
-const BUCKETS = ["overdue", "today", "tomorrow", "week", "later", "nodate", "done", "cancelled"];
-const BUCKET_TITLE = {
-  overdue: "🔴 Просрочено", today: "🟠 Сегодня", tomorrow: "🟡 Завтра", week: "На этой неделе",
-  later: "Позже", nodate: "Без срока", done: "✅ Выполнено", cancelled: "Отменено",
-};
-const MONTHS = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
-const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-const WEEKDAY_NAMES = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"];
-const AVATAR_COLORS = ["#e5484d", "#f08c00", "#30a46c", "#2f7de1", "#8e4ec6", "#d6409f", "#12a594", "#6e56cf", "#0090ff"];
-const EVENT_ICONS = {
-  status: "🔄", comment: "💬", problem: "🆘", resolved: "✔️", checkin: "👍", eta: "🗓", edit: "✏️",
-  created: "➕", archived: "🗑", call: "📞",
-};
+let routeSeq = 0;
 
-const state = {
-  boot: null,
-  pid: null,
-  data: null,
-  tab: null,
-  calls: null,
-  plan: null,
-  showDone: false,
-  filters: { q: "", member: "", block: "", status: "open", prio: "", mine: false },
-};
-
-// ---------- утилиты ----------
-function h(tag, props, ...children) {
-  const el = document.createElement(tag);
-  if (props) {
-    for (const [key, value] of Object.entries(props)) {
-      if (value === undefined || value === null || value === false) continue;
-      if (key === "class") el.className = value;
-      else if (key === "text") el.textContent = value;
-      else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-      else if (key === "value") el.value = value;
-      else if (key === "checked" || key === "selected" || key === "disabled") el[key] = !!value;
-      else el.setAttribute(key, value === true ? "" : value);
-    }
-  }
-  for (const child of children.flat(Infinity)) {
-    if (child === null || child === undefined || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
-  return el;
-}
-
-async function api(path, opts = {}) {
-  const headers = { "X-Init-Data": inTelegram ? tg.initData : "" };
-  let body = opts.body;
-  if (opts.json !== undefined) {
-    headers["Content-Type"] = "application/json";
-    body = JSON.stringify(opts.json);
-  }
-  const res = await fetch(path, { method: opts.method || (body ? "POST" : "GET"), headers, body });
-  let data = null;
-  try { data = await res.json(); } catch (_) { /* пустой ответ */ }
-  if (!res.ok) throw new Error((data && data.error) || `Ошибка ${res.status}`);
-  return data;
-}
-
-function toast(message) {
-  const el = document.getElementById("toast");
-  el.textContent = message;
-  el.hidden = false;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 2600);
-}
-
-function haptic(kind) {
-  try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch (_) { /* старый клиент */ }
-}
-
-function confirmDialog(text) {
-  return new Promise((resolve) => {
-    if (tg && tg.showConfirm && inTelegram) {
-      try { tg.showConfirm(text, (ok) => resolve(!!ok)); return; } catch (_) { /* fallthrough */ }
-    }
-    resolve(window.confirm(text));
-  });
-}
-
-async function run(action, success) {
-  try {
-    const result = await action();
-    if (success) { toast(success); haptic("success"); }
-    return result;
-  } catch (err) {
-    haptic("error");
-    toast("⚠️ " + err.message);
-    throw err;
-  }
-}
-
-function parseISO(s) {
-  const [y, m, d] = s.slice(0, 10).split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-
-function fmtDate(s, withWeekday) {
-  if (!s) return "без срока";
-  const d = parseISO(s);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}` + (withWeekday ? ` (${WEEKDAYS[d.getDay()]})` : "");
-}
-
-function fmtDateTime(s) {
-  const d = new Date(s);
-  return `${d.getDate()} ${MONTHS[d.getMonth()]}, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-function plural(n, one, few, many) {
-  const a = Math.abs(n) % 100;
-  if (a >= 11 && a <= 14) return many;
-  const l = a % 10;
-  if (l === 1) return one;
-  if (l >= 2 && l <= 4) return few;
-  return many;
-}
-
-function daysText(days) {
-  if (days === null || days === undefined) return "без срока";
-  if (days < 0) return `просрочено на ${-days} ${plural(-days, "день", "дня", "дней")}`;
-  if (days === 0) return "сегодня";
-  if (days === 1) return "завтра";
-  return `через ${days} ${plural(days, "день", "дня", "дней")}`;
-}
-
-function isOpen(t) { return ["todo", "progress", "overdue"].includes(t.status); }
-
-function dueLabel(t) {
-  if (!t.deadline) return "без срока";
-  if (!isOpen(t)) return fmtDate(t.deadline);
-  return `${fmtDate(t.deadline)} · ${daysText(t.days_left)}`;
-}
-
-function member(id) { return state.boot.members.find((m) => m.id === id); }
-function me() { return state.boot.me; }
-function isAdmin() { return !!state.boot.me.is_admin; }
-// наблюдатель видит весь проект, но ничего не меняет
-function seesAll() { return isAdmin() || !!state.boot.me.is_observer; }
-function readOnly() { return !isAdmin() && !!state.boot.me.is_observer; }
-function project() { return state.data && state.data.project; }
-function tasks() { return (state.data && state.data.tasks) || []; }
-function initials(name) { return (name || "?").trim().slice(0, 1).toUpperCase(); }
-function avatarColor(id) { return AVATAR_COLORS[(id || 0) % AVATAR_COLORS.length]; }
-function localISO(d) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-// ---------- загрузка ----------
-async function init() {
-  if (tg) {
+// ---------- запуск и вход ----------
+async function start() {
+  applyTheme();
+  if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+  if (inTelegram) {
     tg.ready();
     tg.expand();
-    if (tg.BackButton) tg.BackButton.onClick(closeSheet);
+    if (tg.BackButton) tg.BackButton.onClick(goBack);
+    tg.onEvent("themeChanged", applyTheme);
+    document.documentElement.classList.add("tg");
   }
-  const params = new URLSearchParams(location.search);
+  window.onAuthLost = () => showLogin("Сессия закончилась — войдите снова.");
+  window.onMustChangePassword = () => showChangePassword();
+  document.addEventListener("keydown", globalKeys);
+  window.addEventListener("hashchange", () => { if (S.boot) renderRoute(); });
+  window.addEventListener("beforeunload", flushPageOnUnload);
+  await boot();
+}
+
+function applyTheme() {
+  const pref = store("theme") || "system";
+  let dark;
+  if (pref === "system") {
+    dark = inTelegram ? tg.colorScheme === "dark" : !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  } else dark = pref === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  if (inTelegram) {
+    const bg = dark ? "#191919" : "#ffffff";
+    try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); } catch (_) { /* старый клиент */ }
+  }
+}
+
+async function boot() {
   try {
-    state.boot = await api("/api/bootstrap");
+    S.boot = await api("/api/bootstrap", { noAuthRedirect: true });
   } catch (err) {
-    renderError(err.message);
+    if (err.status === 401) {
+      if (inTelegram) {
+        try {
+          await telegramLogin();
+          return boot();
+        } catch (loginErr) {
+          return showLogin(loginErr.message);
+        }
+      }
+      return showLogin();
+    }
+    return fatal(err.message);
+  }
+  if (S.boot.me.must_change_password && S.boot.me.session_kind === "password") return showChangePassword();
+  if (!S.boot.workspaces.length) return noWorkspaces();
+  await handleDeepLink();
+  renderRoute();
+}
+
+async function telegramLogin() {
+  const r = await api("/api/auth/telegram", { json: { init_data: tg.initData }, noAuthRedirect: true });
+  S.token = r.token;
+}
+
+function authScreen(...children) {
+  closeAllOverlays();
+  closePeek();
+  document.getElementById("app").replaceChildren(h("div", { class: "auth" },
+    h("div", { class: "auth-box" }, h("div", { class: "auth-logo" }, "🏢"), children)));
+}
+
+function showLogin(message) {
+  S.boot = null;
+  S.token = null;
+  const login = h("input", { class: "input", autocomplete: "username", autocapitalize: "none", spellcheck: "false", placeholder: "Логин" });
+  const password = h("input", { class: "input", type: "password", autocomplete: "current-password", placeholder: "Пароль" });
+  const error = h("div", { class: "auth-error", hidden: !message }, message || "");
+  const submit = h("button", { class: "btn primary block", type: "submit" }, "Продолжить");
+  const form = h("form", { class: "auth-form", onsubmit: async (e) => {
+    e.preventDefault();
+    error.hidden = true;
+    submit.disabled = true;
+    try {
+      const r = await api("/api/auth/login", { json: { login: login.value, password: password.value }, noAuthRedirect: true });
+      S.token = r.token;
+      await boot();
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+      submit.disabled = false;
+      password.select();
+    }
+  } },
+  field("Логин", login), field("Пароль", password), error, submit);
+  authScreen(
+    h("h1", { class: "auth-title" }, "Вход в IAC PM"),
+    h("p", { class: "auth-sub" }, "Рабочее пространство команды: задачи проектов, доски и документы."),
+    form,
+    h("p", { class: "auth-hint" }, inTelegram
+      ? "Ваш Telegram пока не связан с аккаунтом. Войдите по логину и паролю или попросите администратора связать аккаунт."
+      : "Логин и пароль выдаёт администратор. Из Telegram вход происходит автоматически — кнопкой «Открыть» в боте."));
+  setTimeout(() => login.focus(), 50);
+}
+
+function showChangePassword() {
+  const current = h("input", { class: "input", type: "password", autocomplete: "current-password" });
+  const next = h("input", { class: "input", type: "password", autocomplete: "new-password" });
+  const repeat = h("input", { class: "input", type: "password", autocomplete: "new-password" });
+  const error = h("div", { class: "auth-error", hidden: true });
+  const submit = h("button", { class: "btn primary block", type: "submit" }, "Сохранить пароль");
+  authScreen(
+    h("h1", { class: "auth-title" }, "Придумайте пароль"),
+    h("p", { class: "auth-sub" }, "Вы вошли с временным паролем от администратора. Задайте свой — минимум 8 символов."),
+    h("form", { class: "auth-form", onsubmit: async (e) => {
+      e.preventDefault();
+      error.hidden = true;
+      if (next.value !== repeat.value) { error.textContent = "Пароли не совпадают"; error.hidden = false; return; }
+      submit.disabled = true;
+      try {
+        await api("/api/auth/password", { json: { current: current.value, new: next.value }, noAuthRedirect: true });
+        toast("Пароль сохранён", "ok");
+        await boot();
+      } catch (err) {
+        error.textContent = err.message;
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    } }, field("Временный пароль", current), field("Новый пароль", next), field("Ещё раз", repeat), error, submit),
+    h("button", { class: "btn ghost block", onclick: logout }, "Выйти"));
+  setTimeout(() => current.focus(), 50);
+}
+
+function noWorkspaces() {
+  authScreen(h("h1", { class: "auth-title" }, "Пока нет доступа"),
+    h("p", { class: "auth-sub" }, `${S.boot.me.name}, вас ещё не добавили ни в одно рабочее пространство. Попросите администратора открыть доступ.`),
+    h("button", { class: "btn block", onclick: () => location.reload() }, "Обновить"),
+    h("button", { class: "btn ghost block", onclick: logout }, "Выйти"));
+}
+
+function fatal(message) {
+  authScreen(h("h1", { class: "auth-title" }, "Не получилось открыть"), h("p", { class: "auth-sub" }, message),
+    h("button", { class: "btn block", onclick: () => location.reload() }, "Попробовать снова"));
+}
+
+async function logout() {
+  try { await api("/api/auth/logout", { json: {}, noAuthRedirect: true }); } catch (_) { /* уже вышли */ }
+  S.token = null;
+  S.ws = null;
+  S.project = null;
+  history.replaceState(null, "", location.pathname);
+  showLogin();
+}
+
+/** Ссылки из бота: ?task=ID, ?tab=my|home|calls. */
+async function handleDeepLink() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("task") && !params.has("tab")) return;
+  history.replaceState(null, "", location.pathname + location.hash);
+  const wid = defaultWid();
+  const taskId = Number(params.get("task"));
+  if (taskId) {
+    try {
+      const t = await api(`/api/tasks/${taskId}`);
+      location.hash = `#/w/${t.workspace_id}/p/${t.project_id}?task=${taskId}`;
+      return;
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+  const tab = params.get("tab");
+  if (tab === "my") location.hash = `#/w/${wid}/my`;
+  else if (tab === "calls") { S.pendingCalls = true; location.hash = `#/w/${wid}`; }
+  else if (tab === "home") location.hash = `#/w/${wid}`;
+}
+
+function defaultWid() {
+  const saved = store("wid");
+  const list = S.boot.workspaces;
+  return (list.find((w) => w.id === saved) || list[0]).id;
+}
+
+// ---------- маршруты ----------
+function parseHash() {
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [path, query] = raw.split("?");
+  const parts = path.split("/").filter(Boolean);
+  const q = new URLSearchParams(query || "");
+  const r = { name: "root", params: {}, wid: null, query: q };
+  if (parts[0] === "w" && Number(parts[1])) {
+    r.wid = Number(parts[1]);
+    const rest = parts.slice(2);
+    if (!rest.length) r.name = "home";
+    else if (rest[0] === "my") r.name = "my";
+    else if (rest[0] === "p" && Number(rest[1])) { r.name = "project"; r.params = { pid: rest[1], section: rest[2] || "" }; }
+    else if (rest[0] === "page" && Number(rest[1])) { r.name = "page"; r.params = { id: Number(rest[1]) }; }
+    else if (rest[0] === "trash") r.name = "trash";
+    else if (rest[0] === "import") r.name = "import";
+    else r.name = "home";
+  } else if (parts[0] === "admin") { r.name = "admin"; r.params = { tab: parts[1] || "users" }; }
+  else if (["team", "reminders", "account"].includes(parts[0])) r.name = parts[0];
+  return r;
+}
+
+function go(hash, replace) {
+  if (location.hash === hash || (location.hash === "" && hash === "#")) { renderRoute(); return; }
+  if (replace) { history.replaceState(null, "", hash); renderRoute(); } else location.hash = hash;
+}
+
+function wsHref(path) { return `#/w/${S.wid}` + (path ? "/" + path : ""); }
+function pageHref(id) { return wsHref("page/" + id); }
+
+async function loadWorkspace() {
+  S.ws = await api(`/api/w/${S.wid}`);
+}
+
+async function refreshWorkspace() {
+  if (!S.wid) return;
+  try { await loadWorkspace(); } catch (_) { return; }
+  renderSidebar();
+}
+
+/** Перечитать данные текущего экрана, сохранив прокрутку. Страницу-документ не трогаем — у неё свой редактор. */
+async function reloadView() {
+  await refreshWorkspace();
+  if (S.route.name === "page") return;
+  await renderRoute({ force: true, keepScroll: true });
+}
+
+async function renderRoute(opts = {}) {
+  if (!S.boot) return;
+  const seq = ++routeSeq;
+  const r = parseHash();
+  if (r.name === "root") { go(`#/w/${defaultWid()}`, true); return; }
+  if (r.wid && r.wid !== S.wid) {
+    if (!S.boot.workspaces.find((w) => w.id === r.wid)) {
+      toast("Нет доступа к этому пространству", "error");
+      go(`#/w/${defaultWid()}`, true);
+      return;
+    }
+    S.wid = r.wid;
+    S.ws = null;
+    S.project = null;
+    store("wid", r.wid);
+  }
+  if (!S.wid) S.wid = defaultWid();
+  const leavingPage = S.pageState && !(r.name === "page" && r.params.id === S.pageState.id && opts.keepPage);
+  if (leavingPage) await leavePage();
+  ensureLayout();
+  if (!opts.keepScroll && window.innerWidth < 900) setSidebar(false);
+  try {
+    if (!S.ws) await loadWorkspace();
+  } catch (err) {
+    if (err.status === 404) { go(`#/w/${defaultWid()}`, true); return; }
+    showError(err);
     return;
   }
-  const saved = Number(safeStorage("get", "pid"));
-  const projects = state.boot.projects;
-  state.pid = (projects.find((p) => p.id === saved) || projects[0] || {}).id || null;
-  const requested = params.get("tab");
-  const allowed = tabs().map((t) => t.id);
-  state.tab = allowed.includes(requested) ? requested : (seesAll() ? "home" : "my");
-  await loadProject();
-  render();
-  const taskId = Number(params.get("task"));
-  if (taskId) openTask(taskId);
-}
-
-function safeStorage(op, key, value) {
+  if (seq !== routeSeq) return;
+  S.route = r;
+  if (!opts.keepScroll) renderSidebar();
+  let view;
   try {
-    if (op === "get") return localStorage.getItem(key);
-    localStorage.setItem(key, value);
-  } catch (_) { /* приватный режим */ }
-  return null;
-}
-
-async function loadProject() {
-  state.data = state.pid ? await api(`/api/projects/${state.pid}`) : null;
-  state.plan = null;
-  if (state.tab === "calls") await loadCalls();
-}
-
-async function loadCalls() {
-  state.calls = state.pid ? await api(`/api/projects/${state.pid}/calls`) : null;
-}
-
-async function reloadBoot() {
-  state.boot = await api("/api/bootstrap");
-  if (!state.boot.projects.find((p) => p.id === state.pid)) {
-    state.pid = state.boot.projects.length ? state.boot.projects[0].id : null;
+    view = await VIEW_HANDLERS[r.name]({ ...r.params, force: opts.force });
+  } catch (err) {
+    if (err.status === 401) return;
+    if (seq !== routeSeq) return;
+    view = errorView(err);
+  }
+  if (seq !== routeSeq || !view) return;
+  mount(view, opts);
+  const taskId = Number(r.query.get("task"));
+  if (taskId) {
+    history.replaceState(null, "", location.hash.split("?")[0]);
+    openPeek(taskId);
   }
 }
 
-async function refresh() {
-  await loadProject();
-  render();
+function errorView(err) {
+  return {
+    title: "Ошибка",
+    crumbs: [{ label: "Не найдено" }],
+    body: h("div", { class: "page" }, emptyState(err.status === 404 ? "🔍" : "⚠️", err.status === 404 ? "Не найдено" : "Не получилось открыть",
+      err.message, h("a", { class: "btn", href: wsHref() }, "На главную"))),
+  };
 }
 
-function renderError(message) {
-  document.getElementById("app").replaceChildren(
-    h("div", { class: "error-screen" },
-      h("h2", null, "Не получилось открыть"),
-      h("p", null, message),
-      !inTelegram ? h("p", { class: "hint", style: "margin-top:12px" }, "Откройте приложение кнопкой «Открыть» в боте.") : null));
+function showError(err) {
+  ensureLayout();
+  mount(errorView(err), {});
 }
 
 // ---------- каркас ----------
-function tabs() {
-  const list = [
-    { id: "my", ico: "👤", label: "Мои" },
-    { id: "home", ico: "📊", label: "Обзор" },
-    { id: "tasks", ico: "📋", label: "Задачи" },
-    { id: "calls", ico: "📞", label: "Обзвон" },
-  ];
-  if (isAdmin()) list.push({ id: "admin", ico: "⚙️", label: "Панель" });
-  return list;
+function ensureLayout() {
+  if (document.querySelector(".layout")) return;
+  const collapsed = !!store("sb:collapsed");
+  document.getElementById("app").replaceChildren(h("div", { class: "layout" + (collapsed ? " sb-collapsed" : "") },
+    h("aside", { class: "sidebar", id: "sidebar" }),
+    h("div", { class: "sidebar-scrim", onclick: () => setSidebar(false) }),
+    h("main", { class: "main" },
+      h("header", { class: "topbar", id: "topbar" }),
+      h("div", { class: "scroller", id: "scroller" }))));
 }
 
-async function switchTab(id) {
-  state.tab = id;
-  if (id === "calls" && state.pid) {
-    try { await loadCalls(); } catch (err) { toast("⚠️ " + err.message); }
-  }
-  render();
-  window.scrollTo(0, 0);
-}
-
-function render() {
-  const views = { my: viewMy, home: viewHome, tasks: viewTasks, calls: viewCalls, admin: viewAdmin };
-  const page = h("div", { class: "page" });
-  if (!state.pid && state.tab !== "admin") page.append(noProject());
-  else page.append(views[state.tab]());
-  document.getElementById("app").replaceChildren(topbar(), page, tabbar());
-}
-
-function noProject() {
-  return h("div", { class: "card empty" },
-    h("div", { style: "font-size:40px" }, "🗂"),
-    h("p", null, "Проектов пока нет."),
-    isAdmin()
-      ? h("button", { class: "btn", onclick: () => switchTab("admin") }, "Загрузить Excel или создать проект")
-      : h("p", { class: "hint" }, "Администратор скоро загрузит таблицу задач."));
-}
-
-function topbar() {
-  const projects = state.boot.projects;
-  const p = project();
-  let title;
-  if (projects.length > 1) {
-    title = h("select", {
-      class: "project-select",
-      onchange: async (e) => {
-        state.pid = Number(e.target.value);
-        safeStorage("set", "pid", state.pid);
-        await refresh();
-      },
-    }, projects.map((x) => h("option", { value: x.id, selected: x.id === state.pid }, x.name)));
-  } else {
-    title = h("div", { class: "project-title" }, p ? p.name : "IAC PM");
-  }
-  let countdown = null;
-  if (p) {
-    if (!p.event_date) countdown = h("div", { class: "countdown warn" }, "⚠️ Дата мероприятия не указана");
-    else {
-      const days = Math.round((parseISO(p.event_date) - parseISO(state.boot.today)) / 86400000);
-      const text = days > 0 ? `До мероприятия ${days} ${plural(days, "день", "дня", "дней")} · ${fmtDate(p.event_date, true)}`
-        : days === 0 ? "🎉 Мероприятие сегодня" : `Мероприятие прошло ${fmtDate(p.event_date)}`;
-      countdown = h("div", { class: "countdown" + (days >= 0 && days <= 3 ? " warn" : "") }, text);
+function mount(view, opts) {
+  const scroller = document.getElementById("scroller");
+  const keep = opts.keepScroll ? {
+    top: scroller.scrollTop,
+    inner: [...scroller.querySelectorAll("[data-keep-scroll]")].map((el) => [el.dataset.keepScroll, el.scrollLeft, el.scrollTop]),
+  } : null;
+  if (opts.keepScroll) renderSidebar();
+  renderTopbar(view);
+  scroller.replaceChildren(view.body);
+  document.title = view.title ? `${view.title} · IAC PM` : "IAC PM";
+  if (keep) {
+    scroller.scrollTop = keep.top;
+    for (const [key, left, top] of keep.inner) {
+      const el = scroller.querySelector(`[data-keep-scroll="${key}"]`);
+      if (el) { el.scrollLeft = left; el.scrollTop = top; }
     }
+  } else {
+    scroller.scrollTop = 0;
   }
-  return h("div", { class: "topbar" }, title, countdown);
+  if (view.afterMount) view.afterMount();
+  markActiveTask();
+  syncBackButton();
 }
 
-function tabbar() {
-  const mine = tasks().filter((t) => t.mine && ["overdue", "today"].includes(t.bucket));
-  return h("nav", { class: "tabbar" }, tabs().map((t) => {
-    const icon = h("span", { class: "ico" + (t.id === "my" && mine.length ? " badge" : ""), "data-n": mine.length || null }, t.ico);
-    return h("button", { class: state.tab === t.id ? "active" : "", onclick: () => switchTab(t.id) }, icon, t.label);
-  }));
+function renderTopbar(view) {
+  const crumbs = (view.crumbs || []).filter(Boolean);
+  const nav = h("nav", { class: "crumbs" });
+  crumbs.forEach((c, i) => {
+    if (i) nav.append(h("span", { class: "crumb-sep" }, "/"));
+    const inner = [c.icon ? h("span", { class: "crumb-icon" }, c.icon) : null, h("span", { class: "crumb-text" }, c.label || "Без названия")];
+    nav.append(c.href && i < crumbs.length - 1 ? h("a", { class: "crumb", href: c.href }, inner) : h("span", { class: "crumb current" }, inner));
+  });
+  document.getElementById("topbar").replaceChildren(
+    h("button", { class: "icon-btn tb-menu", onclick: () => setSidebar(!sidebarVisible()), "aria-label": "Меню" }, icon("menu")),
+    nav,
+    h("div", { class: "tb-actions" }, view.actions || null));
 }
 
-// ---------- элементы ----------
-function statusChip(status) {
-  if (status === "todo") return null;
-  return h("span", { class: `chip s-${status}` }, STATUS_SHORT[status]);
+function sidebarVisible() {
+  const layout = document.querySelector(".layout");
+  if (window.innerWidth < 900) return S.sidebarOpen;
+  return layout && !layout.classList.contains("sb-collapsed");
 }
 
-function taskRow(t, opts = {}) {
-  const owner = opts.owner ? h("span", null, t.responsible || "без ответственного") : null;
-  return h("div", { class: "task" + (["done", "done_late", "cancelled"].includes(t.status) ? " done" : ""), onclick: () => openTask(t.id) },
-    h("div", { class: "prio " + (PRIO_CLASS[t.priority] || "") }),
-    h("div", { class: "body" },
-      h("div", { class: "title" }, t.title),
-      h("div", { class: "meta" },
-        owner,
-        h("span", { class: "due " + t.bucket }, dueLabel(t)),
-        t.status === "overdue" ? null : statusChip(t.status),
-        t.blocked ? h("span", { class: "chip help" }, "нужна помощь") : null,
-        t.eta && isOpen(t) ? h("span", { class: "chip warn" }, "обещано к " + fmtDate(t.eta)) : null)));
-}
-
-function groupedList(list, opts = {}) {
-  const groups = {};
-  for (const t of list) (groups[t.bucket] = groups[t.bucket] || []).push(t);
-  const out = [];
-  for (const b of BUCKETS) {
-    const items = groups[b];
-    if (!items || !items.length) continue;
-    if ((b === "done" || b === "cancelled") && !state.showDone) continue;
-    out.push(h("div", { class: "section" + (b === "overdue" ? " red" : b === "today" ? " orange" : "") },
-      BUCKET_TITLE[b], h("span", { class: "count" }, items.length)));
-    out.push(h("div", { class: "card flush" }, items.map((t) => taskRow(t, opts))));
+function setSidebar(open) {
+  const layout = document.querySelector(".layout");
+  if (!layout) return;
+  if (window.innerWidth < 900) {
+    S.sidebarOpen = open;
+    layout.classList.toggle("sb-open", open);
+  } else {
+    layout.classList.toggle("sb-collapsed", !open);
+    store("sb:collapsed", !open);
   }
-  const closed = (groups.done || []).length + (groups.cancelled || []).length;
-  if (closed) {
-    out.push(h("button", {
-      class: "btn secondary block", style: "margin-top:8px",
-      onclick: () => { state.showDone = !state.showDone; render(); },
-    }, state.showDone ? "Скрыть выполненные" : `Показать выполненные (${closed})`));
+  syncBackButton();
+}
+
+function goBack() {
+  if (S.overlays.length) { closeOverlay(); return; }
+  if (S.peek) { closePeek(); return; }
+  if (S.sidebarOpen) { setSidebar(false); return; }
+  history.back();
+}
+
+function globalKeys(e) {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if (S.boot && S.wid) openSearch();
+    return;
   }
-  if (!out.length) out.push(h("div", { class: "card empty" }, opts.empty || "Задач нет"));
-  return out;
-}
-
-function tile(value, label, cls, onclick) {
-  return h("div", { class: "tile " + (cls || ""), onclick }, h("b", null, value), h("span", null, label));
-}
-
-function progressBar(pct) {
-  return h("div", { class: "progress" }, h("i", { style: `width:${Math.max(0, Math.min(100, pct))}%` }));
-}
-
-function openTasksWith(filters) {
-  state.filters = { q: "", member: "", block: "", status: "open", prio: "", mine: false, ...filters };
-  switchTab("tasks");
-}
-
-// ---------- «Мои» — личный кабинет ----------
-function viewMy() {
-  const mine = tasks().filter((t) => t.mine);
-  const open = mine.filter(isOpen);
-  const done = mine.filter((t) => t.status === "done" || t.status === "done_late").length;
-  const counted = mine.filter((t) => t.status !== "cancelled").length;
-  const pct = counted ? Math.round((100 * done) / counted) : 0;
-  const m = me();
-  const head = h("div", { class: "card" },
-    h("div", { class: "row" },
-      h("div", { class: "avatar", style: `background:${avatarColor(m.id)}` }, initials(m.name)),
-      h("div", { class: "grow" },
-        h("div", { class: "name", style: "font-weight:700" }, m.name),
-        h("div", { class: "hint" }, m.role || (m.username ? "@" + m.username : ""))),
-      h("div", { style: "text-align:right" }, h("b", { style: "font-size:20px" }, pct + "%"), h("div", { class: "hint" }, "готово"))),
-    h("div", { style: "margin-top:10px" }, progressBar(pct)));
-  const tilesEl = h("div", { class: "tiles" },
-    tile(open.filter((t) => t.bucket === "overdue").length, "просрочено", "red"),
-    tile(open.filter((t) => t.bucket === "today").length, "сегодня", "orange"),
-    tile(open.length, "открыто"),
-    tile(open.filter((t) => !t.deadline).length, "без срока", "gray"));
-  if (!mine.length) {
-    return h("div", null, head, h("div", { class: "card empty" }, "За вами пока нет задач 🙌"));
+  if (mod && e.key === "\\") { e.preventDefault(); setSidebar(!sidebarVisible()); return; }
+  if (e.key === "Escape") {
+    if (S.overlays.length) { closeOverlay(); e.preventDefault(); return; }
+    const editing = document.activeElement && (document.activeElement.isContentEditable || /INPUT|TEXTAREA/.test(document.activeElement.tagName));
+    if (S.peek && !editing) { closePeek(); e.preventDefault(); return; }
+    if (S.sidebarOpen) setSidebar(false);
   }
-  return h("div", null, head, tilesEl, groupedList(mine, { empty: "Все задачи закрыты 🎉" }));
 }
 
-// ---------- «Обзор» ----------
-function viewHome() {
-  const d = state.data;
-  const s = d.stats;
-  const p = d.project;
-  const hero = h("div", { class: "card" },
-    h("div", { class: "hero" },
-      h("div", null, h("div", { class: "big" }, s.pct + "%"), h("div", { class: "label" }, "готовность")),
-      h("div", { class: "grow", style: "flex:1" },
-        h("div", { class: "hint", style: "margin-bottom:6px" }, `Выполнено ${s.done} из ${s.total} · в работе ${s.progress}`),
-        progressBar(s.pct))));
-  const tilesEl = h("div", { class: "tiles" },
-    tile(s.overdue, "просрочено", "red", () => openTasksWith({ status: "overdue" })),
-    tile(s.due_today, "срок сегодня", "orange", () => openTasksWith({})),
-    tile(s.blocked, "нужна помощь", s.blocked ? "red" : "", () => openTasksWith({ status: "blocked" })),
-    tile(s.nodate, "без срока", "gray", () => openTasksWith({ status: "nodate" })));
-
-  const byId = Object.fromEntries(d.tasks.map((t) => [t.id, t]));
-  const attention = d.attention.map((id) => byId[id]).filter(Boolean);
-  const out = [hero, tilesEl];
-  if (!p.event_date && isAdmin()) {
-    out.push(h("div", { class: "card" }, h("b", null, "⚠️ Укажите дату мероприятия"),
-      h("p", { class: "hint", style: "margin:6px 0 10px" }, "Тогда бот посчитает обратный отсчёт и предложит сроки для задач без дедлайна."),
-      h("button", { class: "btn small", onclick: () => switchTab("admin") }, "Открыть панель")));
-  }
-  out.push(h("div", { class: "section" }, "🔥 Требует внимания", h("span", { class: "count" }, attention.length)));
-  out.push(attention.length
-    ? h("div", { class: "card flush" }, attention.map((t) => taskRow(t, { owner: true })))
-    : h("div", { class: "card empty" }, s.nodate === s.total - s.done
-      ? "Горящих сроков нет — но у задач не заполнены дедлайны"
-      : "Горящих задач нет 👌"));
-
-  if (readOnly() && d.audit.length) out.push(auditCard());
-
-  out.push(h("div", { class: "section" }, "👥 Команда"));
-  out.push(h("div", { class: "card flush" }, d.workload.filter((w) => w.total || isAdmin()).map((w) =>
-    h("div", { class: "list-item", style: "cursor:pointer", onclick: () => openTasksWith({ member: String(w.member_id) }) },
-      h("div", { class: "avatar", style: `background:${avatarColor(w.member_id)}` }, initials(w.name)),
-      h("div", { class: "grow" },
-        h("div", { class: "row wrap" }, h("span", { class: "name" }, w.name),
-          w.overloaded ? h("span", { class: "chip warn" }, "перегруз") : null,
-          !w.connected ? h("span", { class: "chip" }, "не в боте") : null),
-        h("div", { class: "hint" }, w.role),
-        h("div", { class: "hint", style: "margin:4px 0" },
-          `открыто ${w.open} · ${w.overdue ? "просрочено " + w.overdue + " · " : ""}на неделе ${w.due_week} · готово ${w.done}/${w.total}`),
-        progressBar(w.pct))))));
-
-  out.push(h("div", { class: "section" }, "📦 Блоки"));
-  out.push(h("div", { class: "card" }, d.blocks.map((b) =>
-    h("div", { class: "bar-row", style: "cursor:pointer", onclick: () => openTasksWith({ block: b.block }) },
-      h("div", { class: "row" }, h("span", { style: "flex:1" }, b.block),
-        b.overdue ? h("span", { class: "chip s-overdue" }, b.overdue) : null,
-        h("span", { class: "hint" }, `${b.done}/${b.total}`)),
-      progressBar(b.pct)))));
-
-  if (d.milestones.length) {
-    const today = parseISO(state.boot.today);
-    out.push(h("div", { class: "section" }, "🏁 Вехи"));
-    out.push(h("div", { class: "card" }, h("div", { class: "timeline" }, d.milestones.map((m) => {
-      let cls = "";
-      const done = /выполн|готов|закрыт/i.test(m.status);
-      if (done) cls = "ok";
-      else if (m.date) {
-        const diff = Math.round((parseISO(m.date) - today) / 86400000);
-        cls = diff < 0 ? "past" : diff <= 7 ? "soon" : "";
-      }
-      return h("div", { class: "ms " + cls },
-        h("div", { class: "when" }, (m.date ? fmtDate(m.date, true) : (m.date_raw || "дата не указана")) + (m.status ? " · " + m.status : "")),
-        h("div", { style: "font-weight:600" }, m.title),
-        m.criteria ? h("div", { class: "hint" }, m.criteria) : null);
-    }))));
-  }
-
-  const risks = d.risks.filter((r) => r.is_open);
-  if (risks.length) {
-    out.push(h("details", { class: "card" },
-      h("summary", null, `⚠️ Риски (${risks.length})`),
-      risks.map((r) => h("div", { class: "issue" },
-        h("div", { class: "row wrap" },
-          h("span", { class: "chip" + (/crit/i.test(r.impact) ? " s-overdue" : "") }, `влияние: ${r.impact || "—"}`),
-          h("span", { class: "chip" }, `вероятность: ${r.probability || "—"}`),
-          h("span", { class: "hint" }, r.owner)),
-        h("div", { style: "font-weight:600;margin-top:6px" }, r.title),
-        r.mitigation ? h("div", { class: "hint" }, "Что делать: " + r.mitigation) : null))));
-  }
-  return h("div", null, out);
+// ---------- боковая панель ----------
+function wsBadge(ws, size) {
+  return h("span", { class: "ws-badge" + (size ? " " + size : "") }, ws && ws.icon ? ws.icon : initials(ws ? ws.name : "?").slice(0, 1));
 }
 
-// ---------- «Задачи» ----------
-function filteredTasks() {
-  const f = state.filters;
-  const q = f.q.trim().toLowerCase();
-  return tasks().filter((t) => {
-    if (f.mine && !t.mine) return false;
-    if (f.member && !t.assignee_ids.includes(Number(f.member))) return false;
-    if (f.block && t.block !== f.block) return false;
-    if (f.prio && t.priority !== f.prio) return false;
-    if (f.status === "open" && !isOpen(t)) return false;
-    if (f.status === "overdue" && t.status !== "overdue") return false;
-    if (f.status === "blocked" && !t.blocked) return false;
-    if (f.status === "nodate" && (t.deadline || !isOpen(t))) return false;
-    if (f.status === "progress" && t.status !== "progress") return false;
-    if (f.status === "done" && !["done", "done_late"].includes(t.status)) return false;
-    if (q && !`${t.title} ${t.description} ${t.responsible} ${t.contractor} ${t.block}`.toLowerCase().includes(q)) return false;
-    return true;
+function sbItem(iconName, label, href, opts = {}) {
+  const tagName = href ? "a" : "button";
+  return h(tagName, {
+    class: "sb-item" + (opts.active ? " active" : "") + (opts.cls ? " " + opts.cls : ""), href,
+    onclick: opts.onclick,
+    style: opts.depth ? { paddingLeft: 8 + opts.depth * 14 + "px" } : null,
+  },
+  h("span", { class: "sb-icon" }, typeof iconName === "string" && ICONS[iconName] ? icon(iconName) : iconName),
+  h("span", { class: "sb-label" }, label),
+  opts.badge ? h("span", { class: "sb-badge" }, opts.badge) : null,
+  opts.hint ? h("span", { class: "sb-hint" }, opts.hint) : null);
+}
+
+function sbSection(title, add, children, key) {
+  const collapsed = key ? !!store("sbsec:" + key) : false;
+  const body = h("div", { class: "sb-section-body", hidden: collapsed }, children);
+  const head = h("div", { class: "sb-section-head" },
+    h("button", { class: "sb-section-title", onclick: () => {
+      if (!key) return;
+      body.hidden = !body.hidden;
+      store("sbsec:" + key, body.hidden);
+    } }, title),
+    add ? h("button", { class: "sb-section-add", title: add.title, onclick: add.onclick }, icon("plus")) : null);
+  return h("div", { class: "sb-section" }, head, body);
+}
+
+function renderSidebar() {
+  const sb = document.getElementById("sidebar");
+  if (!sb || !S.ws) return;
+  const r = S.route;
+  const ws = S.boot.workspaces.find((w) => w.id === S.wid) || S.ws.workspace;
+  const urgent = S.ws.projects.reduce((n, p) => n + (p.my_urgent || 0), 0);
+  const admin = isWsAdmin();
+  sb.replaceChildren(
+    h("div", { class: "sb-top" },
+      h("button", { class: "sb-switcher", onclick: (e) => workspaceMenu(e.currentTarget) },
+        wsBadge(ws), h("span", { class: "sb-ws-name" }, ws.name), icon("down", "sb-caret")),
+      h("button", { class: "icon-btn sb-hide", onclick: () => setSidebar(false), title: "Скрыть панель (Ctrl+\\)" }, icon("dleft"))),
+    h("div", { class: "sb-scroll" },
+      h("div", { class: "sb-group" },
+        sbItem("search", "Поиск", null, { onclick: openSearch, hint: navigator.platform.includes("Mac") ? "⌘K" : "Ctrl K" }),
+        sbItem("home", "Главная", wsHref(), { active: r.name === "home" }),
+        sbItem("check", "Мои задачи", wsHref("my"), { active: r.name === "my", badge: urgent || null })),
+      sbSection("Проекты", admin ? { title: "Новый проект", onclick: () => go(wsHref("import")) } : null, projectsTree(), "projects"),
+      sbSection("Страницы", canWrite() ? { title: "Новая страница", onclick: () => createPage(null) } : null, pagesTree(), "pages"),
+      h("div", { class: "sb-group" },
+        admin ? sbItem("upload", "Импорт и архив", wsHref("import"), { active: r.name === "import" }) : null,
+        sbItem("trash", "Корзина", wsHref("trash"), { active: r.name === "trash" })),
+      isSuperadmin() ? sbSection("Администрирование", null, [
+        sbItem("lock", "Доступ", "#/admin/users", { active: r.name === "admin" }),
+        sbItem("users", "Команда", "#/team", { active: r.name === "team" }),
+        sbItem("bell", "Напоминания", "#/reminders", { active: r.name === "reminders" }),
+      ], "admin") : null),
+    h("div", { class: "sb-bottom" },
+      h("button", { class: "sb-profile" + (r.name === "account" ? " active" : ""), onclick: (e) => profileMenu(e.currentTarget) },
+        avatar(me().name, myMemberId(), "sm"),
+        h("span", { class: "sb-profile-text" }, h("span", { class: "sb-profile-name" }, me().name),
+          h("span", { class: "sb-profile-sub" }, ROLE_LABEL[role()] || "")),
+        icon("more"))));
+}
+
+function treeToggle(open, onToggle, hasChildren) {
+  return h("button", { class: "sb-toggle" + (open ? " open" : "") + (hasChildren ? "" : " empty"), onclick: (e) => { e.preventDefault(); e.stopPropagation(); onToggle(); }, "aria-label": open ? "Свернуть" : "Развернуть" }, icon("chevron"));
+}
+
+function projectsTree() {
+  const r = S.route;
+  const projects = S.ws.projects;
+  if (!projects.length) return h("div", { class: "sb-empty" }, isWsAdmin() ? "Загрузите Excel или создайте проект" : "Проектов пока нет");
+  return projects.map((p) => {
+    const activeProject = r.name === "project" && Number(r.params.pid) === p.id;
+    const key = "sb:p:" + p.id;
+    const saved = store(key);
+    const open = saved === null ? activeProject : !!saved;
+    const section = activeProject ? r.params.section || "tasks" : null;
+    const wrap = h("div", { class: "sb-node" });
+    const row = h("a", { class: "sb-item tree" + (activeProject && section === "tasks" ? " active" : ""), href: projectHref(p.id) },
+      h("span", { class: "sb-icon has-toggle" }, h("span", { class: "sb-emoji" }, "📁"), treeToggle(open, () => { store(key, !open); renderSidebar(); }, true)),
+      h("span", { class: "sb-label" }, p.name),
+      p.my_urgent ? h("span", { class: "sb-badge red", title: "Мои срочные задачи" }, p.my_urgent) : null);
+    wrap.append(row);
+    if (open) {
+      const sub = [
+        ["tasks", "board", "Задачи", ""],
+        ["overview", "chart", "Обзор", "overview"],
+        ["calls", "phone", "Обзвон", "calls"],
+        isWsAdmin() ? ["settings", "gear", "Управление", "settings"] : null,
+      ].filter(Boolean);
+      wrap.append(h("div", { class: "sb-children" }, sub.map(([id, ic, label, path]) =>
+        sbItem(ic, label, projectHref(p.id, path), { active: section === id, depth: 1, cls: "sub" }))));
+    }
+    return wrap;
   });
 }
 
-function viewTasks() {
-  const f = state.filters;
-  const listEl = h("div");
-  const counter = h("div", { class: "hint", style: "padding:0 4px 4px" });
-  const redraw = () => {
-    const list = filteredTasks();
-    const prevShow = state.showDone;
-    if (f.status === "done") state.showDone = true;
-    listEl.replaceChildren(...groupedList(list, { owner: true, empty: "Ничего не найдено" }));
-    state.showDone = prevShow;
-    counter.textContent = `Найдено: ${list.length}`;
+function pagesTree() {
+  const pages = S.ws.pages;
+  if (!pages.length) return h("div", { class: "sb-empty" }, canWrite() ? "Создайте первую страницу" : "Страниц пока нет");
+  const byParent = {};
+  for (const p of pages) (byParent[p.parent_id || 0] = byParent[p.parent_id || 0] || []).push(p);
+  for (const list of Object.values(byParent)) list.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+  const activeId = S.route.name === "page" ? S.route.params.id : null;
+  const ancestors = new Set();
+  if (activeId) {
+    const byId = Object.fromEntries(pages.map((p) => [p.id, p]));
+    let cur = byId[activeId];
+    while (cur && cur.parent_id) { ancestors.add(cur.parent_id); cur = byId[cur.parent_id]; }
+  }
+  const node = (p, depth) => {
+    const children = byParent[p.id] || [];
+    const key = "sb:pg:" + p.id;
+    const saved = store(key);
+    const open = saved === null ? ancestors.has(p.id) : !!saved || ancestors.has(p.id);
+    const row = h("a", { class: "sb-item tree" + (p.id === activeId ? " active" : ""), href: pageHref(p.id), style: { paddingLeft: 8 + depth * 14 + "px" } },
+      h("span", { class: "sb-icon has-toggle" }, h("span", { class: "sb-emoji" }, p.icon || "📄"),
+        treeToggle(open, () => { store(key, !open); renderSidebar(); }, children.length)),
+      h("span", { class: "sb-label" }, p.title || "Без названия"),
+      canWrite() ? h("span", { class: "sb-actions" },
+        h("button", { class: "sb-act", title: "Ещё", onclick: (e) => { e.preventDefault(); e.stopPropagation(); pageMenu(e.currentTarget, p); } }, icon("more")),
+        h("button", { class: "sb-act", title: "Вложенная страница", onclick: (e) => { e.preventDefault(); e.stopPropagation(); createPage(p.id); } }, icon("plus"))) : null);
+    return h("div", { class: "sb-node" }, row,
+      open ? (children.length ? children.map((c) => node(c, depth + 1))
+        : h("div", { class: "sb-empty", style: { paddingLeft: 30 + (depth + 1) * 14 + "px" } }, "Нет вложенных страниц")) : null);
   };
-  const set = (key) => (e) => { f[key] = e.target.value; redraw(); };
-  const blocks = [...new Set(tasks().map((t) => t.block).filter(Boolean))];
-  const people = state.boot.members.filter((m) => m.active);
-  const search = h("input", { class: "search", type: "search", placeholder: "Поиск по задачам, подрядчикам…", value: f.q,
-    oninput: (e) => { f.q = e.target.value; redraw(); } });
-  const filters = h("div", { class: "filters" },
-    h("button", { class: "pill" + (f.mine ? " on" : ""), onclick: (e) => { f.mine = !f.mine; e.target.classList.toggle("on"); redraw(); } }, "Мои"),
-    h("select", { onchange: set("status") },
-      [["open", "Открытые"], ["overdue", "Просроченные"], ["blocked", "Нужна помощь"], ["nodate", "Без срока"],
-        ["progress", "В работе"], ["done", "Выполненные"], ["", "Все"]]
-        .map(([v, l]) => h("option", { value: v, selected: f.status === v }, l))),
-    h("select", { onchange: set("member") }, h("option", { value: "" }, "Все люди"),
-      people.map((m) => h("option", { value: m.id, selected: String(m.id) === f.member }, m.name))),
-    h("select", { onchange: set("block") }, h("option", { value: "" }, "Все блоки"),
-      blocks.map((b) => h("option", { value: b, selected: b === f.block }, b))),
-    h("select", { onchange: set("prio") }, h("option", { value: "" }, "Любой приоритет"),
-      PRIORITIES.map((p) => h("option", { value: p, selected: p === f.prio }, p))));
-  redraw();
-  return h("div", null, search, filters, counter,
-    isAdmin() ? h("button", { class: "btn secondary block", style: "margin-bottom:8px", onclick: () => openTaskForm(null) }, "➕ Новая задача") : null,
-    listEl);
+  return (byParent[0] || []).map((p) => node(p, 0));
 }
 
-// ---------- «Обзвон» ----------
-function viewCalls() {
-  const c = state.calls;
-  if (!c) return h("div", { class: "card empty" }, "Загрузка…");
+function workspaceMenu(anchor) {
+  popMenu(anchor, [
+    ...S.boot.workspaces.map((w) => ({
+      label: h("span", { class: "menu-ws" }, wsBadge(w, "sm"), h("span", null, w.name)), hint: ROLE_LABEL[w.role] || "",
+      checked: w.id === S.wid, onClick: () => { if (w.id !== S.wid) go(`#/w/${w.id}`); },
+    })),
+    isSuperadmin() ? { divider: true } : null,
+    isSuperadmin() ? { label: "Управление пространствами", icon: "gear", onClick: () => go("#/admin/workspaces") } : null,
+  ], { title: me().login ? me().login : "Пространства", cls: "ws-menu" });
+}
+
+function profileMenu(anchor) {
+  popMenu(anchor, [
+    { label: "Мой аккаунт", icon: "user", onClick: () => go("#/account") },
+    { label: "Тема оформления", icon: "sparkle", onClick: () => themeMenu(anchor) },
+    { divider: true },
+    { label: "Выйти", icon: "logout", onClick: logout },
+  ], { title: me().name });
+}
+
+function themeMenu(anchor) {
+  const cur = store("theme") || "system";
+  popMenu(anchor, [["system", "Как в системе"], ["light", "Светлая"], ["dark", "Тёмная"]].map(([v, label]) => ({
+    label, checked: cur === v, onClick: () => { store("theme", v); applyTheme(); },
+  })), { title: "Тема" });
+}
+
+// ---------- недавнее ----------
+function remember(kind, id, title, emoji) {
+  const key = "recent:" + S.wid;
+  const list = (store(key) || []).filter((x) => !(x.kind === kind && x.id === id));
+  list.unshift({ kind, id, title, icon: emoji, at: Date.now() });
+  store(key, list.slice(0, 12));
+}
+
+function recentItems() {
+  const list = store("recent:" + S.wid) || [];
+  const pages = Object.fromEntries(S.ws.pages.map((p) => [p.id, p]));
+  const projects = Object.fromEntries(S.ws.projects.map((p) => [p.id, p]));
+  return list.map((x) => {
+    if (x.kind === "page" && pages[x.id]) return { ...x, title: pages[x.id].title || "Без названия", icon: pages[x.id].icon || "📄", href: pageHref(x.id) };
+    if (x.kind === "project" && projects[x.id]) return { ...x, title: projects[x.id].name, icon: "📁", href: projectHref(x.id) };
+    return null;
+  }).filter(Boolean).slice(0, 8);
+}
+
+// ---------- главная ----------
+function greeting() {
+  const hour = new Date().getHours();
+  const name = me().name.split(/\s+/)[0];
+  const text = hour < 5 ? "Доброй ночи" : hour < 12 ? "Доброе утро" : hour < 18 ? "Добрый день" : "Добрый вечер";
+  return `${text}, ${name}`;
+}
+
+async function viewHome() {
+  const my = await api(`/api/w/${S.wid}/my`);
+  if (S.pendingCalls) {
+    S.pendingCalls = false;
+    if (S.ws.projects.length) { go(projectHref(S.ws.projects[0].id, "calls"), true); return null; }
+  }
+  const ws = S.ws;
+  const open = my.tasks.filter(isOpen);
+  const soon = open.filter((t) => ["overdue", "today", "tomorrow"].includes(t.bucket) || t.blocked).slice(0, 8);
+  const recent = recentItems();
   const out = [];
-  const items = c.items;
-  const doneCount = items.filter((i) => i.check).length;
-  out.push(h("div", { class: "card" },
-    h("div", { class: "row" }, h("b", { style: "flex:1" }, `Обзвон на ${fmtDate(c.today, true)}`),
-      h("span", { class: "hint" }, `${doneCount}/${items.length}`)),
-    h("div", { class: "hint", style: "margin-top:4px" }, seesAll()
-      ? "Бот сам собирает, кому позвонить: просрочки, «нужна помощь», сроки сегодня/завтра без старта, подрядчики по ближайшим задачам."
-      : "Ваши запланированные звонки. Бот напомнит в назначенное время."),
-    items.length ? h("div", { style: "margin-top:10px" }, progressBar(items.length ? (100 * doneCount) / items.length : 0)) : null));
-
-  if (items.length) {
-    out.push(h("div", { class: "card flush" }, items.map(callItem)));
-  } else {
-    out.push(h("div", { class: "card empty" }, "На сегодня звонить некому 👌"));
+  out.push(h("h1", { class: "home-greeting" }, greeting()));
+  if (recent.length) {
+    out.push(h("div", { class: "home-section" }, sectionTitle("🕘 Недавние"),
+      h("div", { class: "recent-row" }, recent.map((x) => h("a", { class: "recent-card", href: x.href },
+        h("div", { class: "recent-cover c-" + colorFor(x.title) }), h("div", { class: "recent-icon" }, x.icon),
+        h("div", { class: "recent-title" }, x.title), h("div", { class: "recent-sub" }, x.kind === "page" ? "Страница" : "Проект"))))));
   }
-
-  const planned = c.planned.filter((p) => p.status === "planned");
-  out.push(h("div", { class: "section" }, "🗓 Запланированные звонки", h("span", { class: "count" }, planned.length)));
-  if (planned.length) {
-    out.push(h("div", { class: "card flush" }, planned.map((p) => {
-      const who = p.member_id ? member(p.member_id) : null;
-      return h("div", { class: "list-item" },
-        h("div", { class: "grow" },
-          h("div", { class: "name" }, p.contact),
-          h("div", { class: "hint" }, fmtDateTime(p.due_at) + (who ? " · звонит " + who.name : "")),
-          p.phone ? h("a", { href: "tel:" + p.phone }, p.phone) : null,
-          p.note ? h("div", { class: "hint" }, p.note) : null),
-        isAdmin() || p.member_id === me().id ? h("div", { class: "row" },
-          h("button", { class: "btn small green", onclick: () => run(() => api(`/api/calls/${p.id}/done`, { json: {} }), "Отмечено").then(() => switchTab("calls")) }, "✓"),
-          h("button", { class: "btn small secondary", onclick: () => run(() => api(`/api/calls/${p.id}/cancel`, { json: {} }), "Отменено").then(() => switchTab("calls")) }, "✕")) : null);
-    })));
-  }
-  if (!readOnly()) out.push(h("button", { class: "btn block", style: "margin-top:8px", onclick: () => openCallForm(null) }, "📞 Запланировать звонок"));
-  return h("div", null, out);
-}
-
-function callItem(item) {
-  const done = !!item.check;
-  const toggle = async () => {
-    await run(() => api(`/api/projects/${state.pid}/calls/check`, { json: { key: item.key, checked: !done } }), done ? "Снято" : "Созвонились ✓");
-    await loadCalls();
-    render();
+  out.push(h("div", { class: "home-section" },
+    sectionTitle("☑️ Мои задачи", open.length || null, h("a", { class: "section-link", href: wsHref("my") }, "Все →")),
+    !my.linked ? callout("🔗", "Аккаунт не связан с участником команды, поэтому личных задач нет. Администратор может связать его в разделе «Доступ».", "gray")
+      : soon.length ? taskLines(soon, { project: true })
+        : h("p", { class: "muted" }, open.length ? "Горящих задач нет — всё по плану 👌" : "За вами нет открытых задач 🙌")));
+  out.push(h("div", { class: "home-section" },
+    sectionTitle("📁 Проекты", ws.projects.length || null),
+    h("div", { class: "boards-grid" }, ws.projects.map(projectTile),
+      isWsAdmin() ? h("a", { class: "board-tile add", href: wsHref("import") }, icon("plus"), h("span", null, "Новый проект")) : null),
+    !ws.projects.length && !isWsAdmin() ? h("p", { class: "muted" }, "Проектов пока нет.") : null));
+  const roots = ws.pages.filter((p) => !p.parent_id).sort((a, b) => a.sort_order - b.sort_order);
+  out.push(h("div", { class: "home-section" },
+    sectionTitle("📄 Страницы", roots.length || null),
+    h("div", { class: "pages-grid" }, roots.map((p) => h("a", { class: "page-tile", href: pageHref(p.id) },
+      h("span", { class: "page-tile-icon" }, p.icon || "📄"), h("span", { class: "page-tile-title" }, p.title || "Без названия"),
+      h("span", { class: "page-tile-sub" }, relTime(p.updated_at)))),
+    canWrite() ? h("button", { class: "page-tile add", onclick: () => createPage(null) }, icon("plus"), h("span", null, "Новая страница")) : null)));
+  return {
+    title: "Главная",
+    crumbs: [{ icon: wsBadge(S.boot.workspaces.find((w) => w.id === S.wid)), label: ws.workspace.name }, { label: "Главная" }],
+    body: h("div", { class: "page home" }, out),
   };
-  const contacts = [];
-  if (item.username) contacts.push(h("a", { href: `https://t.me/${item.username}` }, "@" + item.username));
-  if (item.phone) contacts.push(h("a", { href: "tel:" + item.phone }, item.phone));
-  return h("div", { class: "list-item call-item" + (done ? " done" : "") },
-    h("button", { class: "call-check" + (done ? " on" : ""), onclick: toggle, disabled: readOnly(), "aria-label": "Отметить" }, done ? "✓" : ""),
-    h("div", { class: "grow" },
-      h("div", { class: "name" }, item.title),
-      h("div", { class: "hint" }, [item.subtitle, item.caller ? "звонит " + item.caller : "", item.due_at ? fmtDateTime(item.due_at) : ""].filter(Boolean).join(" · ")),
-      contacts.length ? h("div", { class: "row wrap", style: "font-size:13px;margin-top:2px" }, contacts) : null,
-      item.owners && item.owners.length ? h("div", { class: "hint" }, "ответственные: " + item.owners.join(", ")) : null,
-      item.tasks.length ? h("ul", { class: "call-tasks" }, item.tasks.slice(0, 5).map((t) =>
-        h("li", { style: "cursor:pointer", onclick: () => openTask(t.task_id) }, `${t.title} — ${t.reason}`))) : null,
-      done && item.check.member_name ? h("div", { class: "hint" }, "✓ " + item.check.member_name + (item.check.note ? ": " + item.check.note : "")) : null));
 }
 
-// ---------- нижний лист ----------
-function showSheet(content) {
-  const root = document.getElementById("sheet-root");
-  root.replaceChildren(
-    h("div", { class: "sheet-backdrop", onclick: closeSheet }),
-    h("div", { class: "sheet" }, h("div", { class: "grabber" }), h("button", { class: "close", onclick: closeSheet, "aria-label": "Закрыть" }, "✕"), content));
-  document.body.style.overflow = "hidden";
-  if (tg && tg.BackButton) tg.BackButton.show();
+function projectTile(p) {
+  const s = p.stats;
+  const ev = eventInfo(p);
+  return h("a", { class: "board-tile", href: projectHref(p.id) },
+    h("div", { class: "tile-cover c-" + colorFor(p.name) }, h("span", { class: "tile-icon" }, "📁")),
+    h("div", { class: "tile-body" },
+      h("div", { class: "tile-title" }, p.name),
+      h("div", { class: "tile-meta" }, p.event_date ? `${fmtDate(p.event_date, true)}${ev ? " · " + ev.text : ""}` : "дата не указана"),
+      progressBar(s.pct),
+      h("div", { class: "tile-tags" },
+        h("span", { class: "muted small" }, `${s.pct}% · ${s.done}/${s.total}`), h("span", { class: "grow" }),
+        s.overdue ? tag(`${s.overdue} просроч.`, "red", "sm") : null,
+        p.my_open ? tag(`мои: ${p.my_open}`, "blue", "sm") : null)));
 }
 
-function closeSheet() {
-  document.getElementById("sheet-root").replaceChildren();
-  document.body.style.overflow = "";
-  if (tg && tg.BackButton) tg.BackButton.hide();
+// ---------- мои задачи ----------
+async function viewMy() {
+  const data = await api(`/api/w/${S.wid}/my`);
+  const open = data.tasks.filter(isOpen);
+  const overdue = open.filter((t) => t.status === "overdue").length;
+  const todayCount = open.filter((t) => t.bucket === "today").length;
+  const head = h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "☑️"), h("h1", { class: "page-title" }, "Мои задачи"),
+    h("div", { class: "head-props" },
+      h("span", { class: "head-prop static" }, `Открыто ${open.length}`),
+      overdue ? h("span", { class: "head-prop static warn" }, `Просрочено ${overdue}`) : null,
+      todayCount ? h("span", { class: "head-prop static" }, `Срок сегодня ${todayCount}`) : null));
+  const body = !data.linked
+    ? callout("🔗", "Аккаунт не связан с участником команды — задачи назначаются по имени в колонке «Ответственный». Попросите администратора связать аккаунт в разделе «Доступ».", "gray")
+    : renderTaskDB({ key: "my:" + S.wid, tasks: data.tasks, showProject: true, canCreate: false, noMine: true,
+      defaults: { view: "list" }, readOnly: role() === "viewer" });
+  return { title: "Мои задачи", crumbs: [{ icon: "☑️", label: "Мои задачи" }], body: h("div", { class: "page full" }, head, body) };
 }
 
-async function openTask(id) {
-  let t;
-  try { t = await api(`/api/tasks/${id}`); } catch (err) { toast("⚠️ " + err.message); return; }
-  showSheet(taskSheet(t));
+// ---------- страницы-документы ----------
+function pagesById() { return Object.fromEntries(S.ws.pages.map((p) => [p.id, p])); }
+
+async function createPage(parentId, opts = {}) {
+  try {
+    const r = await run(() => api(`/api/w/${S.wid}/pages`, { json: { title: "", parent_id: parentId } }));
+    if (parentId) store("sb:pg:" + parentId, true);
+    await refreshWorkspace();
+    if (opts.navigate !== false) go(pageHref(r.data.id));
+    return r.data;
+  } catch (_) {
+    return null;
+  }
 }
 
-function taskSheet(t) {
-  const reopen = async () => { await refresh(); openTask(t.id); };
-  const act = (fn, msg) => async () => { await run(fn, msg); await reopen(); };
-  const owners = t.assignee_ids.map(member).filter(Boolean);
-  const kv = [
-    ["Срок", t.deadline ? `${fmtDate(t.deadline, true)}${isOpen(t) ? " · " + daysText(t.days_left) : ""}` : "без срока"],
-    ["Начало", t.start_date ? fmtDate(t.start_date, true) : null],
-    ["Ответственный", owners.length ? owners.map((m) => m.name + (m.username ? ` (@${m.username})` : "")).join(", ") : (t.responsible || "—")],
-    ["Блок", t.block],
-    ["Подрядчик", t.contractor],
-    ["Обещано к", t.eta && isOpen(t) ? fmtDate(t.eta, true) : null],
-    ["Выполнено", t.fact_date ? fmtDate(t.fact_date, true) : null],
-    ["Результат", t.proof],
-  ].filter(([, v]) => v);
+function pageMenu(anchor, p) {
+  popMenu(anchor, [
+    { label: "Открыть", icon: "page", onClick: () => go(pageHref(p.id)) },
+    { label: "Вложенная страница", icon: "plus", onClick: () => createPage(p.id) },
+    { label: "Переместить в…", icon: "arrow", onClick: () => movePageMenu(anchor, p) },
+    { label: "Скопировать ссылку", icon: "link", onClick: () => copyText(`${location.origin}${location.pathname}${pageHref(p.id)}`) },
+    { divider: true },
+    { label: "Удалить", icon: "trash", danger: true, onClick: () => trashPage(p) },
+  ], { title: p.title || "Без названия" });
+}
 
-  const inputArea = h("div");
-  const openInput = (kind) => {
-    const ta = h("textarea", { placeholder: kind === "problem" ? "Что мешает? Какая помощь нужна?" : "Комментарий…" });
-    const send = h("button", { class: "btn block", onclick: act(async () => {
-      if (!ta.value.trim()) throw new Error("Напишите текст");
-      await api(`/api/tasks/${t.id}/${kind}`, { json: { text: ta.value } });
-    }, kind === "problem" ? "Передано руководителю 🆘" : "Сохранено 💬") }, kind === "problem" ? "Отправить руководителю" : "Сохранить");
-    inputArea.replaceChildren(h("div", { class: "card" }, h("label", { class: "field" }, ta), send));
-    ta.focus();
+function movePageMenu(anchor, p) {
+  const pages = S.ws.pages;
+  const blocked = new Set([p.id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const x of pages) if (x.parent_id && blocked.has(x.parent_id) && !blocked.has(x.id)) { blocked.add(x.id); grew = true; }
+  }
+  popMenu(anchor, [
+    { label: "В корень (без родителя)", icon: "home", checked: !p.parent_id, onClick: () => movePage(p, null) },
+    { divider: true },
+    ...pages.filter((x) => !blocked.has(x.id)).map((x) => ({ label: x.title || "Без названия", icon: x.icon || "📄",
+      checked: p.parent_id === x.id, onClick: () => movePage(p, x.id) })),
+  ], { title: "Переместить в", search: "Найти страницу…" });
+}
+
+async function movePage(p, parentId) {
+  await run(() => api(`/api/pages/${p.id}/move`, { json: { parent_id: parentId } }), "Страница перемещена");
+  if (parentId) store("sb:pg:" + parentId, true);
+  await refreshWorkspace();
+  if (S.route.name === "page" && S.route.params.id === p.id) renderTopbar(pageTopbar(p.id));
+}
+
+async function trashPage(p) {
+  const children = S.ws.pages.filter((x) => x.parent_id === p.id).length;
+  if (children && !(await confirmDialog(`Переместить «${p.title || "Без названия"}» и вложенные страницы в корзину?`, "В корзину"))) return;
+  await run(() => api(`/api/pages/${p.id}`, { method: "DELETE" }), "Перемещено в корзину");
+  const wasOpen = S.route.name === "page" && (S.route.params.id === p.id || isDescendant(S.route.params.id, p.id));
+  if (wasOpen && S.pageState) { S.pageState.save.cancel(); S.pageState.dirty = false; }
+  await refreshWorkspace();
+  if (wasOpen) go(wsHref());
+}
+
+function isDescendant(id, ancestorId) {
+  const byId = pagesById();
+  let cur = byId[id];
+  while (cur && cur.parent_id) {
+    if (cur.parent_id === ancestorId) return true;
+    cur = byId[cur.parent_id];
+  }
+  return false;
+}
+
+function pageCrumbs(id) {
+  const byId = pagesById();
+  const chain = [];
+  let cur = byId[id];
+  while (cur) { chain.unshift(cur); cur = cur.parent_id ? byId[cur.parent_id] : null; }
+  return chain.map((p) => ({ icon: p.icon || "📄", label: p.title || "Без названия", href: pageHref(p.id) }));
+}
+
+function pageTopbar(id) {
+  const st = S.pageState;
+  const p = pagesById()[id];
+  return {
+    crumbs: pageCrumbs(id),
+    actions: [
+      h("span", { class: "save-state", id: "save-state" }, st ? st.stateText || "" : ""),
+      p ? h("button", { class: "icon-btn", title: "Ещё", onclick: (e) => (canWrite() ? pageMenu(e.currentTarget, p)
+        : popMenu(e.currentTarget, [{ label: "Скопировать ссылку", icon: "link", onClick: () => copyText(location.href) }])) }, icon("more")) : null,
+    ],
   };
-
-  const actions = [];
-  if (t.can_edit) {
-    const row = [];
-    if (isOpen(t)) {
-      if (t.raw_status !== "progress") row.push(h("button", { class: "btn secondary", onclick: act(() => api(`/api/tasks/${t.id}/status`, { json: { status: "progress" } }), "Взято в работу") }, "▶️ В работу"));
-      row.push(h("button", { class: "btn green", onclick: act(() => api(`/api/tasks/${t.id}/status`, { json: { status: "done" } }), "Выполнено ✅") }, "✅ Выполнено"));
-    } else {
-      row.push(h("button", { class: "btn secondary", onclick: act(() => api(`/api/tasks/${t.id}/status`, { json: { status: "progress" } }), "Возвращено в работу") }, "↩️ Вернуть в работу"));
-    }
-    actions.push(h("div", { class: "btns" }, row));
-    actions.push(h("div", { class: "btns" },
-      t.blocked
-        ? h("button", { class: "btn secondary", onclick: act(() => api(`/api/tasks/${t.id}/resolve`, { json: {} }), "Блокер снят") }, "✔️ Проблема решена")
-        : h("button", { class: "btn danger", onclick: () => openInput("problem") }, "🆘 Нужна помощь"),
-      h("button", { class: "btn secondary", onclick: () => openInput("comment") }, "💬 Комментарий")));
-  }
-  if (isAdmin()) {
-    actions.push(h("div", { class: "btns three" },
-      h("button", { class: "btn secondary small", onclick: () => openTaskForm(t) }, "✏️ Изменить"),
-      h("button", { class: "btn secondary small", onclick: () => openCallForm({ task_id: t.id, contact: t.contractor || "" }) }, "📞 Звонок"),
-      h("button", { class: "btn danger small", onclick: async () => {
-        if (!(await confirmDialog("Удалить задачу? Из Excel/таблицы она не удалится."))) return;
-        await run(() => api(`/api/tasks/${t.id}`, { method: "DELETE" }), "Удалено");
-        closeSheet();
-        await refresh();
-      } }, "🗑 Удалить")));
-  } else if (t.can_edit) {
-    actions.push(h("button", { class: "btn secondary block small", style: "margin-top:8px", onclick: () => openCallForm({ task_id: t.id, contact: t.contractor || "" }) }, "📞 Напомнить позвонить"));
-  }
-
-  return h("div", null,
-    h("h2", null, t.title),
-    h("div", { class: "row wrap", style: "margin:0 4px 12px" },
-      t.priority ? h("span", { class: "chip" }, t.priority) : null,
-      h("span", { class: `chip s-${t.status}` }, STATUS_SHORT[t.status]),
-      t.source === "manual" ? h("span", { class: "chip" }, "создана в боте") : null),
-    t.blocked ? h("div", { class: "blocker" }, h("b", null, "🆘 Нужна помощь"), h("div", null, t.blocked_reason)) : null,
-    h("div", { class: "card" },
-      h("dl", { class: "kv", style: "margin:0" }, kv.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
-      t.description ? h("p", { style: "margin:12px 0 0;white-space:pre-wrap" }, t.description) : null,
-      t.sheet_comment ? h("p", { class: "hint", style: "margin:10px 0 0;white-space:pre-wrap" }, "Комментарий из таблицы: " + t.sheet_comment) : null),
-    actions,
-    inputArea,
-    t.events.length ? h("div", null,
-      h("div", { class: "section" }, "История"),
-      h("div", { class: "card" }, t.events.map((e) => h("div", { class: "event" },
-        h("div", null, `${EVENT_ICONS[e.kind] || "•"} ${e.member_name ? e.member_name + ": " : ""}${e.text}`),
-        h("div", { class: "when" }, fmtDateTime(e.created_at)))))) : null);
 }
 
-function field(label, input) {
-  return h("label", { class: "field" }, h("span", null, label), input);
+function setSaveState(text, error) {
+  if (!S.pageState) return;
+  S.pageState.stateText = text;
+  const el = document.getElementById("save-state");
+  if (el) { el.textContent = text; el.classList.toggle("error", !!error); }
 }
 
-function openTaskForm(t) {
-  const isNew = !t;
-  const blocks = [...new Set(tasks().map((x) => x.block).filter(Boolean))];
-  const people = state.boot.members.filter((m) => m.active);
-  const f = {
-    title: h("input", { value: t ? t.title : "", placeholder: "Что сделать" }),
-    block: h("input", { value: t ? t.block : "", list: "blocks-list", placeholder: "Например, ДИЗАЙН / БРЕНДИНГ" }),
-    description: h("textarea", { placeholder: "Подробности, критерий готовности" }),
-    priority: h("select", null, h("option", { value: "" }, "—"), PRIORITIES.map((p) => h("option", { value: p, selected: t && t.priority === p }, p))),
-    responsible: h("input", { value: t ? t.responsible : "", list: "people-list", placeholder: "Имя из команды" }),
-    start_date: h("input", { type: "date", value: t && t.start_date ? t.start_date : "" }),
-    deadline: h("input", { type: "date", value: t && t.deadline ? t.deadline : "" }),
-    contractor: h("input", { value: t ? t.contractor : "", placeholder: "Подрядчик / поставщик" }),
-    status: h("select", null, STATUS_OPTIONS.map(([v, l]) => h("option", { value: v, selected: t ? t.raw_status === v : v === "todo" }, l))),
+async function leavePage() {
+  const st = S.pageState;
+  if (!st) return;
+  if (st.dirty) await st.save.flush();
+  if (st.editor) st.editor.destroy();
+  S.pageState = null;
+}
+
+function flushPageOnUnload() {
+  const st = S.pageState;
+  if (!st || !st.dirty) return;
+  const headers = { "Content-Type": "application/json" };
+  if (S.token) headers.Authorization = "Bearer " + S.token;
+  try {
+    fetch(`/api/pages/${st.id}`, { method: "PUT", headers, keepalive: true, credentials: "same-origin",
+      body: JSON.stringify({ title: st.title, icon: st.icon, content: st.content, version: st.version }) });
+  } catch (_) { /* браузер закрывается */ }
+}
+
+async function viewPage(params) {
+  const page = await api(`/api/pages/${params.id}`);
+  if (page.workspace_id !== S.wid) { go(`#/w/${page.workspace_id}/page/${page.id}`, true); return null; }
+  const editable = page.can_edit;
+  const st = {
+    id: page.id, version: page.version, title: page.title, icon: page.icon, content: page.content,
+    dirty: false, saving: false, again: false, stateText: "", editor: null,
   };
-  f.description.value = t ? t.description : "";
-  const save = h("button", { class: "btn block", onclick: async () => {
-    const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-    const result = await run(() => isNew
-      ? api(`/api/projects/${state.pid}/tasks`, { json: body })
-      : api(`/api/tasks/${t.id}`, { method: "PATCH", json: body }), isNew ? "Задача создана" : "Сохранено");
-    await refresh();
-    openTask(isNew ? result.data.id : t.id);
-  } }, isNew ? "➕ Создать задачу" : "💾 Сохранить");
-  showSheet(h("div", null,
-    h("h2", null, isNew ? "Новая задача" : "Редактирование"),
-    h("datalist", { id: "blocks-list" }, blocks.map((b) => h("option", { value: b }))),
-    h("datalist", { id: "people-list" }, people.map((m) => h("option", { value: m.name }, m.role))),
-    h("div", { class: "card" },
-      field("Название *", f.title),
-      field("Ответственный", f.responsible),
-      h("div", { class: "grid2" }, field("Начало", f.start_date), field("Срок (дедлайн)", f.deadline)),
-      h("div", { class: "grid2" }, field("Приоритет", f.priority), field("Статус", f.status)),
-      field("Блок", f.block),
-      field("Описание", f.description),
-      field("Подрядчик", f.contractor),
-      isNew ? h("p", { class: "hint", style: "margin:0 0 10px" }, "Ответственный получит уведомление в личку.") : null,
-      save)));
-  f.title.focus();
-}
+  S.pageState = st;
+  remember("page", page.id, page.title, page.icon);
+  const banner = h("div", { class: "conflict-slot" });
 
-function openCallForm(preset) {
-  const now = new Date();
-  now.setMinutes(0, 0, 0);
-  now.setHours(now.getHours() + 1);
-  const pad = (n) => String(n).padStart(2, "0");
-  const dt = `${localISO(now)}T${pad(now.getHours())}:00`;
-  const people = state.boot.members.filter((m) => m.active);
-  const f = {
-    contact: h("input", { value: (preset && preset.contact) || "", placeholder: "Кому звонить (имя / компания)" }),
-    phone: h("input", { type: "tel", placeholder: "+998 …" }),
-    due_at: h("input", { type: "datetime-local", value: dt }),
-    member_id: h("select", { disabled: !isAdmin() }, people.map((m) => h("option", { value: m.id, selected: m.id === me().id }, m.name))),
-    task_id: h("select", null, h("option", { value: "" }, "— без задачи —"),
-      tasks().filter(isOpen).map((t) => h("option", { value: t.id, selected: preset && preset.task_id === t.id }, t.title))),
-    note: h("textarea", { placeholder: "О чём договориться" }),
-  };
-  const save = h("button", { class: "btn block", onclick: async () => {
-    const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-    await run(() => api(`/api/projects/${state.pid}/calls`, { json: body }), "Напомню в назначенное время 📞");
-    closeSheet();
-    if (state.tab === "calls") await switchTab("calls");
-  } }, "Запланировать");
-  showSheet(h("div", null,
-    h("h2", null, "📞 Напоминание о звонке"),
-    h("div", { class: "card" },
-      field("Кому *", f.contact),
-      h("div", { class: "grid2" }, field("Телефон", f.phone), field("Когда *", f.due_at)),
-      field("Кто звонит", f.member_id),
-      field("По задаче", f.task_id),
-      field("Заметка", f.note),
-      save)));
-}
-
-// ---------- «Панель» (админ) ----------
-function viewAdmin() {
-  const p = project();
-  const out = [];
-  if (p) {
-    out.push(projectCard(p));
-    out.push(h("details", { class: "card", open: true },
-      h("summary", null, "➕ Добавить задачу"),
-      h("p", { class: "hint", style: "margin:0 0 10px" }, "Или в чате: /add @ник 30.09 Название"),
-      h("button", { class: "btn block", onclick: () => openTaskForm(null) }, "Открыть форму")));
-  }
-  out.push(uploadCard());
-  out.push(sheetCard(p));
-  if (p) {
-    out.push(planCard(p));
-    out.push(auditCard());
-  }
-  out.push(teamCard());
-  out.push(settingsCard());
-  out.push(newProjectCard());
-  return h("div", null, out);
-}
-
-function projectCard(p) {
-  const name = h("input", { value: p.name });
-  const date = h("input", { type: "date", value: p.event_date || "" });
-  const source = p.source_type === "gsheet"
-    ? [h("div", { class: "hint" }, "Источник: Google Таблица"),
-      h("a", { href: p.source_url, target: "_blank", style: "font-size:13px;overflow-wrap:anywhere" }, p.source_url),
-      h("div", { class: "hint" }, "Последняя синхронизация: " + (p.last_sync_at ? fmtDateTime(p.last_sync_at) : "—")),
-      p.last_sync_error ? h("div", { class: "hint", style: "color:var(--red)" }, "Ошибка: " + p.last_sync_error) : null]
-    : [h("div", { class: "hint" }, p.source_type === "upload" ? "Источник: загруженный Excel" : "Проект создан в боте")];
-  return h("div", { class: "card" },
-    h("h3", null, "📁 Проект"),
-    field("Название", name),
-    field("Дата мероприятия", date),
-    source,
-    h("div", { class: "btns" },
-      h("button", { class: "btn", onclick: async () => {
-        await run(() => api(`/api/projects/${p.id}`, { method: "PATCH", json: { name: name.value, event_date: date.value || null } }), "Сохранено");
-        await reloadBoot();
-        await refresh();
-      } }, "Сохранить"),
-      h("button", { class: "btn secondary", onclick: () => run(() => api(`/api/projects/${p.id}/export`, { json: {} }), "Файл отправлен в чат с ботом 📥") }, "📥 Excel в чат")),
-    p.source_type === "gsheet" ? h("button", { class: "btn secondary block", style: "margin-top:8px", onclick: async () => {
-      const r = await run(() => api(`/api/projects/${p.id}/sync`, { json: {} }));
-      toast(`Синхронизировано: ${r.data.tasks} задач, новых ${r.data.added}`);
-      await refresh();
-    } }, "🔄 Синхронизировать сейчас") : null,
-    h("button", { class: "btn danger block small", style: "margin-top:8px", onclick: async () => {
-      if (!(await confirmDialog("Архивировать проект? Напоминания по нему прекратятся."))) return;
-      await run(() => api(`/api/projects/${p.id}`, { method: "PATCH", json: { archived: true } }), "Проект в архиве");
-      await reloadBoot();
-      await refresh();
-    } }, "Архивировать проект"));
-}
-
-function uploadCard() {
-  const input = h("input", { type: "file", accept: ".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-  const result = h("div");
-  const btn = h("button", { class: "btn block", onclick: async () => {
-    if (!input.files.length) { toast("Выберите файл .xlsx"); return; }
-    const form = new FormData();
-    form.append("file", input.files[0]);
-    btn.disabled = true;
+  st.save = debounce(async () => {
+    if (S.pageState !== st || !st.dirty) return;
+    if (st.saving) { st.again = true; return; }
+    st.saving = true;
+    st.dirty = false;
+    setSaveState("Сохранение…");
     try {
-      const r = await run(() => api("/api/upload", { body: form }), "Таблица загружена 📥");
-      state.pid = r.data.project_id;
-      safeStorage("set", "pid", state.pid);
-      await reloadBoot();
-      await loadProject();
-      render();
-      toast(`Задач: ${r.data.tasks} (новых ${r.data.added}, обновлено ${r.data.updated})`);
+      const r = await api(`/api/pages/${st.id}`, { method: "PUT", json: { title: st.title, icon: st.icon, content: st.content, version: st.version } });
+      st.version = r.data.version;
+      setSaveState("Сохранено");
+      const entry = S.ws.pages.find((p) => p.id === st.id);
+      if (entry && (entry.title !== r.data.title || entry.icon !== r.data.icon)) {
+        entry.title = r.data.title;
+        entry.icon = r.data.icon;
+        renderSidebar();
+        if (S.route.name === "page" && S.route.params.id === st.id) renderTopbar(pageTopbar(st.id));
+      }
+    } catch (err) {
+      st.dirty = true;
+      if (err.status === 409) showConflict(st, err.data.page, banner);
+      else setSaveState("Не сохранено", true);
     } finally {
-      btn.disabled = false;
+      st.saving = false;
+      if (st.again) { st.again = false; st.save(); }
     }
-  } }, "Загрузить");
-  return h("details", { class: "card" },
-    h("summary", null, "📎 Загрузить Excel"),
-    h("p", { class: "hint", style: "margin:0 0 10px" },
-      "Колонки ищутся по заголовкам: «Процедура», «Ответственный», «Статус процедуры», «Окончание работы»… " +
-      "Повторная загрузка того же проекта обновит задачи, не потеряв статусы из бота. Можно просто прислать файл боту в личку."),
-    field("Файл .xlsx", input), btn, result);
-}
+  }, 700);
+  const changed = () => { st.dirty = true; setSaveState("Изменено"); st.save(); };
 
-function sheetCard(p) {
-  const url = h("input", { type: "url", placeholder: "https://docs.google.com/spreadsheets/d/…", value: p && p.source_type === "gsheet" ? p.source_url : "" });
-  const email = state.boot.sheets_service_email;
-  return h("details", { class: "card" },
-    h("summary", null, "🔗 Google Таблица"),
-    h("p", { class: "hint", style: "margin:0 0 10px" },
-      "Откройте доступ «Все, у кого есть ссылка — Читатель». Бот будет забирать изменения каждые " +
-      (state.boot.settings.sync_minutes || 10) + " мин."),
-    email
-      ? h("p", { class: "hint", style: "margin:0 0 10px" }, "✍️ Чтобы статусы из бота записывались в таблицу, выдайте доступ «Редактор» адресу: ", h("b", null, email))
-      : h("p", { class: "hint", style: "margin:0 0 10px" }, "Запись статусов обратно в таблицу выключена (нужен сервисный аккаунт Google, см. README). Актуальный Excel всегда можно выгрузить кнопкой «Excel в чат»."),
-    field("Ссылка", url),
-    h("button", { class: "btn block", onclick: async () => {
-      const r = await run(() => api("/api/sheet", { json: { url: url.value } }), "Таблица подключена 🔗");
-      state.pid = r.data.project_id;
-      safeStorage("set", "pid", state.pid);
-      await reloadBoot();
-      await refresh();
-    } }, "Подключить"));
-}
-
-function planCard(p) {
-  const box = h("div");
-  const nodate = tasks().filter((t) => isOpen(t) && !t.deadline).length;
-  const drawPlan = () => {
-    if (!state.plan) return;
-    const items = state.plan;
-    const checks = items.map(() => h("input", { type: "checkbox", checked: true }));
-    const apply = h("button", { class: "btn block", style: "margin-top:10px", onclick: async () => {
-      const chosen = items.filter((_, i) => checks[i].checked).map((x) => ({ task_id: x.task_id, deadline: x.deadline }));
-      if (!chosen.length) { toast("Ничего не выбрано"); return; }
-      const r = await run(() => api(`/api/projects/${p.id}/plan`, { json: { items: chosen } }));
-      toast(`Сроки проставлены: ${r.data.applied}`);
-      state.plan = null;
-      await refresh();
-    } }, `Применить выбранные`);
-    box.replaceChildren(
-      h("div", { class: "hint", style: "margin:8px 0" }, `Предложено сроков: ${items.length}. Снимите галочки там, где срок не подходит — потом его можно поправить в задаче.`),
-      h("div", { class: "card flush", style: "background:var(--bg)" }, items.map((x, i) =>
-        h("label", { class: "list-item", style: "cursor:pointer" }, checks[i],
-          h("div", { class: "grow" },
-            h("div", { class: "name" }, x.title),
-            h("div", { class: "hint" }, `${fmtDate(x.deadline, true)} (T${x.offset >= 0 ? "+" : ""}${x.offset}) · ${x.responsible || "—"}`),
-            h("div", { class: "hint" }, x.rule + (x.note ? " · " + x.note : "")))))),
-      apply);
+  const iconEl = h("button", { class: "page-emoji" + (st.icon ? "" : " hidden"), disabled: !editable,
+    onclick: (e) => emojiPicker(e.currentTarget, setIcon, true) }, st.icon || "");
+  function setIcon(emoji) {
+    st.icon = emoji;
+    iconEl.textContent = emoji;
+    iconEl.classList.toggle("hidden", !emoji);
+    addIcon.hidden = !!emoji || !editable;
+    changed();
+  }
+  const addIcon = h("button", { class: "page-add-icon", hidden: !!st.icon || !editable,
+    onclick: (e) => emojiPicker(e.currentTarget, setIcon) }, "☺ Добавить иконку");
+  const title = h("h1", { class: "page-title doc", "data-placeholder": "Без названия" });
+  title.textContent = st.title;
+  if (editable) {
+    title.contentEditable = "true";
+    title.spellcheck = false;
+    title.addEventListener("input", () => {
+      st.title = title.textContent.replace(/\s+/g, " ").trim();
+      if (!title.textContent) title.replaceChildren();
+      changed();
+    });
+    title.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || (e.key === "ArrowDown" && !e.shiftKey)) { e.preventDefault(); st.editor.focusFirst(); }
+    });
+    title.addEventListener("paste", (e) => {
+      e.preventDefault();
+      document.execCommand("insertText", false, (e.clipboardData || window.clipboardData).getData("text").replace(/\s+/g, " "));
+    });
+  }
+  const meta = h("div", { class: "page-meta" },
+    page.updated_by ? `Изменено: ${page.updated_by}, ${relTime(page.updated_at)}` : `Создано ${relTime(page.created_at)}`,
+    !editable ? h("span", { class: "tag c-gray sm" }, page.archived ? "в корзине" : "только чтение") : null);
+  const editorEl = h("div", { class: "page-editor" });
+  st.editor = new BlockEditor(editorEl, {
+    blocks: page.content, editable,
+    onChange: (blocks) => { st.content = blocks; changed(); },
+    pageInfo: (id) => pagesById()[id],
+    onOpenPage: (id) => go(pageHref(id)),
+    onCreateSubpage: () => createPage(st.id, { navigate: false }),
+  });
+  const linked = new Set(page.content.filter((b) => b.type === "page").map((b) => b.page_id));
+  const children = S.ws.pages.filter((p) => p.parent_id === page.id && !linked.has(p.id)).sort((a, b) => a.sort_order - b.sort_order);
+  const subpages = children.length ? h("div", { class: "subpages" }, children.map((c) =>
+    h("a", { class: "blk-pagelink", href: pageHref(c.id) }, h("span", { class: "pl-icon" }, c.icon || "📄"), h("span", { class: "pl-title" }, c.title || "Без названия")))) : null;
+  const view = {
+    title: page.title || "Без названия",
+    ...pageTopbar(page.id),
+    body: h("div", { class: "page doc" }, banner,
+      h("div", { class: "page-head doc" }, iconEl, h("div", { class: "page-head-tools" }, addIcon), title, meta),
+      editorEl, subpages),
+    afterMount: () => {
+      if (editable && !page.title && page.content.length <= 1 && !richLen((page.content[0] || {}).rich || [])) title.focus();
+    },
   };
-  const load = h("button", { class: "btn block", disabled: !p.event_date || !nodate, onclick: async () => {
-    const r = await run(() => api(`/api/projects/${p.id}/plan`));
-    state.plan = r.items;
-    drawPlan();
-  } }, "Предложить сроки");
-  drawPlan();
-  return h("details", { class: "card", open: !!state.plan },
-    h("summary", null, `🗓 Черновик сроков (${nodate} без срока)`),
-    h("p", { class: "hint", style: "margin:0 0 10px" }, p.event_date
-      ? "Бот расставит дедлайны задачам без срока обратным отсчётом от дня мероприятия (KV за 18 дней, производство за 10, монтаж T-1, отчёт T+7…) и разнесёт их так, чтобы у человека было не больше 3 дедлайнов в день."
-      : "Сначала укажите дату мероприятия в карточке проекта."),
-    load, box);
+  return view;
 }
 
-function auditCard() {
-  const issues = state.data.audit;
-  return h("details", { class: "card" },
-    h("summary", null, `🧹 Проверка таблицы (${issues.length})`),
-    issues.length ? h("div", { class: "card flush", style: "background:var(--bg)" }, issues.map((i) => h("div", { class: "issue" },
-      h("div", { class: "lvl " + i.level }, i.level === "critical" ? "Важно" : i.level === "warning" ? "Проверить" : "Инфо"),
-      h("div", { style: "font-weight:600" }, `${i.title}: ${i.count}`),
-      i.hint ? h("div", { class: "hint" }, i.hint) : null,
-      h("ul", null, i.items.slice(0, 8).map((x) => h("li", null, x)), i.items.length > 8 ? h("li", null, `…ещё ${i.count - 8}`) : null))))
-      : h("div", { class: "empty" }, "Всё заполнено 👍"));
+function showConflict(st, server, slot) {
+  setSaveState("Конфликт", true);
+  slot.replaceChildren(callout("⚠️", h("div", null,
+    h("b", null, `Страницу изменил(а) ${server.updated_by || "другой человек"}.`),
+    " Ваши последние правки ещё не сохранены — выберите, что оставить."), "yellow",
+  h("div", { class: "inline" },
+    h("button", { class: "btn sm", onclick: async () => {
+      st.dirty = false;
+      slot.replaceChildren();
+      await leavePage();
+      renderRoute({ force: true });
+    } }, "Загрузить их версию"),
+    h("button", { class: "btn sm primary", onclick: () => {
+      st.version = server.version;
+      slot.replaceChildren();
+      st.dirty = true;
+      st.save.flush();
+    } }, "Оставить мою"))));
 }
 
-function teamCard() {
-  const members = state.boot.members;
-  return h("details", { class: "card" },
-    h("summary", null, `👥 Команда (${members.filter((m) => m.active).length})`),
-    h("div", { class: "card flush", style: "background:var(--bg)" }, members.map((m) =>
-      h("div", { class: "list-item", style: "cursor:pointer" + (m.active ? "" : ";opacity:.5"), onclick: () => openMemberForm(m) },
-        h("div", { class: "avatar", style: `background:${avatarColor(m.id)}` }, initials(m.name)),
-        h("div", { class: "grow" },
-          h("div", { class: "row wrap" }, h("span", { class: "name" }, m.name),
-            m.is_admin ? h("span", { class: "chip" }, "админ") : null,
-            m.is_pm ? h("span", { class: "chip" }, "PM") : null,
-            m.is_observer ? h("span", { class: "chip" }, "наблюдатель") : null,
-            m.connected ? h("span", { class: "chip s-done" }, "в боте") : h("span", { class: "chip warn" }, "не нажал Start")),
-          h("div", { class: "hint" }, `${m.role || ""}${m.username ? " · @" + m.username : ""}`),
-          m.assists_id && member(m.assists_id) ? h("div", { class: "hint" }, "выполняет задачи за: " + member(m.assists_id).name) : null)))),
-    h("button", { class: "btn secondary block", style: "margin-top:10px", onclick: () => openMemberForm(null) }, "➕ Добавить участника"));
+// ---------- поиск ----------
+function openSearch() {
+  if (!S.ws) return;
+  let close;
+  let seq = 0;
+  let items = [];
+  let active = 0;
+  const input = h("input", { class: "search-input", placeholder: `Поиск в «${S.ws.workspace.name}»…` });
+  const results = h("div", { class: "search-results" });
+  const pick = (item) => { close(); item.go(); };
+  const draw = (groups) => {
+    items = [];
+    results.replaceChildren();
+    for (const [title, list] of groups) {
+      if (!list.length) continue;
+      results.append(h("div", { class: "search-group" }, title));
+      for (const item of list) {
+        const index = items.length;
+        items.push(item);
+        results.append(h("button", { class: "search-item" + (index === active ? " active" : ""), dataset: { index },
+          onmouseenter: () => setActive(index), onclick: () => pick(item) },
+        h("span", { class: "search-icon" }, item.icon), h("span", { class: "search-title" }, item.title),
+        item.sub ? h("span", { class: "search-sub" }, item.sub) : null));
+      }
+    }
+    if (!items.length) results.append(h("div", { class: "search-empty" }, input.value.trim().length >= 2 ? "Ничего не найдено" : "Начните вводить название страницы, проекта или задачи"));
+  };
+  const setActive = (i) => {
+    active = Math.max(0, Math.min(items.length - 1, i));
+    results.querySelectorAll(".search-item").forEach((el) => el.classList.toggle("active", Number(el.dataset.index) === active));
+    const el = results.querySelector(".search-item.active");
+    if (el) el.scrollIntoView({ block: "nearest" });
+  };
+  const initial = () => {
+    active = 0;
+    const recent = recentItems().map((x) => ({ icon: x.icon, title: x.title, sub: x.kind === "page" ? "страница" : "проект", go: () => go(x.href) }));
+    draw([["Недавние", recent], ["Проекты", S.ws.projects.slice(0, 6).map((p) => ({ icon: "📁", title: p.name, go: () => go(projectHref(p.id)) }))]]);
+  };
+  const search = debounce(async () => {
+    const q = input.value.trim();
+    if (q.length < 2) { initial(); return; }
+    const my = ++seq;
+    try {
+      const r = await api(`/api/w/${S.wid}/search?q=${encodeURIComponent(q)}`);
+      if (my !== seq) return;
+      active = 0;
+      const byId = pagesById();
+      draw([
+        ["Страницы", r.pages.map((p) => ({ icon: p.icon || "📄", title: p.title || "Без названия",
+          sub: p.parent_id && byId[p.parent_id] ? byId[p.parent_id].title : "", go: () => go(pageHref(p.id)) }))],
+        ["Проекты", r.projects.map((p) => ({ icon: "📁", title: p.name, go: () => go(projectHref(p.id)) }))],
+        ["Задачи", r.tasks.map((t) => ({ icon: statusDot(t.status), title: t.title, sub: t.project_name,
+          go: () => { go(projectHref(t.project_id)); openPeek(t.id); } }))],
+      ]);
+    } catch (_) { /* ошибка уже показана */ }
+  }, 220);
+  input.addEventListener("input", search);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
+    if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
+    if (e.key === "Enter" && items[active]) { e.preventDefault(); pick(items[active]); }
+  });
+  const box = h("div", { class: "search-box" }, h("div", { class: "search-head" }, icon("search"), input,
+    h("button", { class: "icon-btn search-close", onclick: () => close(), "aria-label": "Закрыть" }, icon("close"))), results,
+  h("div", { class: "search-foot" }, h("span", null, "↑↓ выбрать"), h("span", null, "↵ открыть"), h("span", null, "esc закрыть")));
+  const wrap = h("div", { class: "search-wrap", onmousedown: (e) => { if (e.target === wrap) close(); } }, box);
+  close = pushOverlay(wrap);
+  initial();
+  input.focus();
 }
 
-function openMemberForm(m) {
+// ---------- корзина ----------
+async function viewTrash() {
+  const r = await api(`/api/w/${S.wid}/trash`);
+  const admin = isWsAdmin();
+  const body = r.pages.length ? h("div", { class: "trash-list" }, r.pages.map((p) => h("div", { class: "trash-row" },
+    h("span", { class: "trash-icon" }, p.icon || "📄"),
+    h("div", { class: "trash-main" }, h("div", { class: "trash-title" }, p.title || "Без названия"),
+      h("div", { class: "muted small" }, `Удалено ${relTime(p.updated_at)}${p.updated_by ? " · " + p.updated_by : ""}`)),
+    canWrite() ? h("button", { class: "btn sm", onclick: async () => {
+      await run(() => api(`/api/pages/${p.id}/restore`, { json: {} }), "Страница восстановлена");
+      await refreshWorkspace();
+      renderRoute({ force: true, keepScroll: true });
+    } }, icon("undo"), "Восстановить") : null,
+    admin ? h("button", { class: "btn sm ghost danger-text", onclick: async () => {
+      if (!(await confirmDialog(`Удалить «${p.title || "Без названия"}» навсегда? Вложенные страницы тоже удалятся.`, "Удалить навсегда"))) return;
+      await run(() => api(`/api/pages/${p.id}/purge`, { json: {} }), "Удалено навсегда");
+      renderRoute({ force: true, keepScroll: true });
+    } }, "Удалить навсегда") : null)))
+    : emptyState("🗑", "Корзина пуста", "Удалённые страницы попадают сюда — их можно восстановить.");
+  return {
+    title: "Корзина",
+    crumbs: [{ icon: "🗑", label: "Корзина" }],
+    body: h("div", { class: "page" }, h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "🗑"), h("h1", { class: "page-title" }, "Корзина")), body),
+  };
+}
+
+// ---------- импорт и новый проект ----------
+async function viewImport() {
+  if (!isWsAdmin()) return errorView({ status: 403, message: "Импорт доступен администратору пространства" });
+  const ws = S.ws;
+  const out = [];
+  // загрузка Excel
+  const fileInput = h("input", { type: "file", accept: ".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", hidden: true });
+  const drop = h("div", { class: "dropzone", tabindex: "0", onclick: () => fileInput.click(), onkeydown: (e) => { if (e.key === "Enter") fileInput.click(); } },
+    icon("upload"), h("div", { class: "dz-title" }, "Перетащите .xlsx сюда или нажмите, чтобы выбрать"),
+    h("div", { class: "muted small" }, "Колонки ищутся по заголовкам: «Процедура», «Ответственный», «Статус процедуры», «Окончание работы»…"));
+  const upload = async (file) => {
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    drop.classList.add("busy");
+    try {
+      const r = await run(() => api(`/api/w/${S.wid}/upload`, { body: form }), "Таблица загружена 📥");
+      await refreshWorkspace();
+      importSummary(r.data, r.data.project_id);
+    } catch (_) { /* показано */ } finally {
+      drop.classList.remove("busy");
+      fileInput.value = "";
+    }
+  };
+  fileInput.addEventListener("change", () => upload(fileInput.files[0]));
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files[0]); });
+  out.push(h("div", { class: "import-card" }, h("div", { class: "import-head" }, h("span", { class: "import-emoji" }, "📎"),
+    h("div", null, h("div", { class: "import-title" }, "Загрузить Excel"),
+      h("div", { class: "muted small" }, "Повторная загрузка того же проекта обновит задачи, не потеряв статусы из бота. Файл можно и просто прислать боту."))),
+  drop, fileInput));
+
+  // Google Таблица
+  const url = h("input", { class: "input", type: "url", placeholder: "https://docs.google.com/spreadsheets/d/…" });
+  const email = S.boot.sheets_service_email;
+  out.push(h("div", { class: "import-card" }, h("div", { class: "import-head" }, h("span", { class: "import-emoji" }, "🔗"),
+    h("div", null, h("div", { class: "import-title" }, "Подключить Google Таблицу"),
+      h("div", { class: "muted small" }, `Откройте доступ «Все, у кого есть ссылка — Читатель». Изменения подтягиваются автоматически.`))),
+  email ? callout("✍️", h("span", null, "Чтобы статусы из кабинета записывались в таблицу, выдайте доступ «Редактор» адресу ", h("b", { class: "break" }, email)), "blue") : null,
+  h("div", { class: "inline grow-first" }, url, h("button", { class: "btn primary", onclick: async () => {
+    const r = await run(() => api(`/api/w/${S.wid}/sheet`, { json: { url: url.value } }), "Таблица подключена 🔗");
+    await refreshWorkspace();
+    importSummary(r.data, r.data.project_id);
+  } }, "Подключить"))));
+
+  // пустой проект
+  const name = h("input", { class: "input", placeholder: "Например, Открытие шоурума" });
+  const date = h("input", { class: "input", type: "date" });
+  out.push(h("div", { class: "import-card" }, h("div", { class: "import-head" }, h("span", { class: "import-emoji" }, "✨"),
+    h("div", null, h("div", { class: "import-title" }, "Пустой проект"), h("div", { class: "muted small" }, "Задачи добавите на доске или в таблице."))),
+  h("div", { class: "grid2" }, field("Название", name), field("Дата мероприятия", date)),
+  h("div", { class: "btn-row" }, h("button", { class: "btn primary", onclick: async () => {
+    const r = await run(() => api(`/api/w/${S.wid}/projects`, { json: { name: name.value, event_date: date.value || null } }), "Проект создан");
+    await refreshWorkspace();
+    go(projectHref(r.data.id));
+  } }, "Создать проект"))));
+
+  if (ws.archived_projects.length) {
+    out.push(h("h2", { class: "h2" }, "🗄 Архив проектов"));
+    out.push(h("div", { class: "trash-list" }, ws.archived_projects.map((p) => h("div", { class: "trash-row" },
+      h("span", { class: "trash-icon" }, "📁"), h("div", { class: "trash-main" }, h("div", { class: "trash-title" }, p.name),
+        h("div", { class: "muted small" }, p.event_date ? fmtDate(p.event_date) : "дата не указана")),
+      h("button", { class: "btn sm", onclick: async () => {
+        await run(() => api(`/api/projects/${p.id}`, { method: "PATCH", json: { archived: false } }), "Проект возвращён");
+        await refreshWorkspace();
+        renderRoute({ force: true, keepScroll: true });
+      } }, icon("undo"), "Вернуть")))));
+  }
+  return {
+    title: "Импорт и новый проект",
+    crumbs: [{ icon: "📥", label: "Импорт и архив" }],
+    body: h("div", { class: "page" }, h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "📥"),
+      h("h1", { class: "page-title" }, "Новый проект"),
+      h("p", { class: "page-lead" }, `Проект появится в пространстве «${ws.workspace.name}».`)), out),
+  };
+}
+
+function importSummary(data, pid) {
+  const warnings = data.warnings || [];
+  const close = modal("Готово", h("div", null,
+    h("div", { class: "summary-grid" },
+      h("div", { class: "stat" }, h("div", { class: "stat-label" }, "Задач"), h("div", { class: "stat-value" }, data.tasks)),
+      h("div", { class: "stat" }, h("div", { class: "stat-label" }, "Новых"), h("div", { class: "stat-value" }, data.added)),
+      h("div", { class: "stat" }, h("div", { class: "stat-label" }, "Обновлено"), h("div", { class: "stat-value" }, data.updated)),
+      data.removed ? h("div", { class: "stat" }, h("div", { class: "stat-label" }, "Убрано"), h("div", { class: "stat-value" }, data.removed)) : null),
+    warnings.length ? callout("⚠️", h("div", null, h("b", null, "Обратите внимание"), h("ul", null, warnings.map((w) => h("li", null, w)))), "yellow") : null,
+    data.audit && data.audit.length ? h("p", { class: "muted small" }, `Проверка таблицы нашла замечаний: ${data.audit.length}. Подробности — в разделе «Обзор».`) : null,
+    h("div", { class: "btn-row end" }, h("button", { class: "btn primary", onclick: () => { close(); S.project = null; go(projectHref(pid)); } }, "Открыть проект"))));
+}
+
+// ---------- администрирование: доступ ----------
+function randomPassword() {
+  const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => alphabet[b % alphabet.length]).join("");
+}
+
+async function viewAdmin(params) {
+  if (!isSuperadmin()) return errorView({ status: 403, message: "Раздел доступен главному администратору" });
+  const data = await api("/api/admin");
+  const tab = params.tab === "workspaces" ? "workspaces" : "users";
+  const tabs = h("div", { class: "db-bar" }, h("div", { class: "db-tabs" },
+    h("a", { class: "db-tab" + (tab === "users" ? " active" : ""), href: "#/admin/users" }, icon("users"), h("span", null, `Пользователи · ${data.users.length}`)),
+    h("a", { class: "db-tab" + (tab === "workspaces" ? " active" : ""), href: "#/admin/workspaces" }, icon("workspace"), h("span", null, `Пространства · ${data.workspaces.length}`))),
+  h("div", { class: "db-tools" }, tab === "users"
+    ? h("button", { class: "btn primary sm", onclick: () => userModal(null, data) }, "Добавить пользователя")
+    : h("button", { class: "btn primary sm", onclick: () => workspaceModal(null) }, "Новое пространство")));
+  const body = tab === "users" ? usersTable(data) : workspacesTable(data);
+  return {
+    title: "Доступ",
+    crumbs: [{ icon: "🔒", label: "Доступ" }, { label: tab === "users" ? "Пользователи" : "Пространства" }],
+    body: h("div", { class: "page full" }, h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "🔒"), h("h1", { class: "page-title" }, "Доступ"),
+      h("p", { class: "page-lead" }, "Кто может входить в кабинет и что видит в каждом пространстве. Люди видят только те пространства, куда вы их добавили.")),
+    tabs, h("div", { class: "section-body" }, body)),
+  };
+}
+
+function usersTable(data) {
+  const wsById = Object.fromEntries(data.workspaces.map((w) => [w.id, w]));
+  const memberById = Object.fromEntries(data.members.map((m) => [m.id, m]));
+  return h("div", { class: "table-wrap" }, h("table", { class: "db-table" },
+    h("colgroup", null, [260, 300, 190, 170, 120].map((w) => h("col", { style: { width: w + "px" } }))),
+    h("thead", null, h("tr", null, [["user", "Пользователь"], ["workspace", "Пространства"], ["phone", "Telegram"], ["lock", "Вход"], ["status", "Статус"]]
+      .map(([ic, label]) => h("th", null, h("div", { class: "th" }, icon(ic), h("span", null, label)))))),
+    h("tbody", null, data.users.map((u) => {
+      const m = u.member_id ? memberById[u.member_id] : null;
+      const roles = Object.entries(u.roles || {}).map(([wid, r]) => wsById[wid] ? tag(`${wsById[wid].icon || ""} ${wsById[wid].name}: ${ROLE_LABEL[r]}`.trim(),
+        r === "admin" ? "purple" : r === "member" ? "blue" : "gray", "sm") : null);
+      return h("tr", { onclick: () => userModal(u, data), class: u.active ? "" : "closed" },
+        h("td", null, h("div", { class: "cell-inner" }, h("span", { class: "person" }, avatar(u.name, u.member_id || -u.id, "sm"),
+          h("span", null, h("b", null, u.name), h("span", { class: "muted small block" }, u.login))))),
+        h("td", null, h("div", { class: "cell-inner wrap" }, u.is_superadmin ? tag("Главный администратор", "red", "sm") : null,
+          roles.length ? roles : (!u.is_superadmin ? h("span", { class: "muted" }, "нет доступа") : null))),
+        h("td", null, h("div", { class: "cell-inner" }, m ? h("span", null, m.name, m.connected ? "" : h("span", { class: "muted small" }, " · не в боте")) : h("span", { class: "muted" }, "—"))),
+        h("td", null, h("div", { class: "cell-inner" }, u.has_password ? (u.must_change_password ? tag("временный пароль", "yellow", "sm") : tag("пароль задан", "green", "sm"))
+          : tag("только Telegram", "gray", "sm"))),
+        h("td", null, h("div", { class: "cell-inner" }, u.active ? statusPill("green", "Активен") : statusPill("default", "Отключён"))));
+    }))));
+}
+
+function userModal(u, data) {
+  const isNew = !u;
+  const linkedMembers = new Set(data.users.filter((x) => x.member_id && (!u || x.id !== u.id)).map((x) => x.member_id));
   const f = {
-    name: h("input", { value: m ? m.name : "", placeholder: "Как в колонке «Ответственный»" }),
-    username: h("input", { value: m ? m.username : "", placeholder: "ник без @" }),
-    role: h("input", { value: m ? m.role : "" }),
-    aliases: h("input", { value: m ? m.aliases : "", placeholder: "Другие написания через запятую" }),
-    phone: h("input", { type: "tel", value: m ? m.phone : "" }),
-    assists_id: h("select", null, h("option", { value: "" }, "— ни за кого —"),
-      state.boot.members.filter((x) => x.active && (!m || x.id !== m.id))
-        .map((x) => h("option", { value: x.id, selected: m && m.assists_id === x.id }, x.name))),
+    name: h("input", { class: "input", value: u ? u.name : "", placeholder: "Имя и фамилия" }),
+    login: h("input", { class: "input", value: u ? u.login : "", placeholder: "латиницей, например ivan", autocapitalize: "none", spellcheck: "false" }),
+    member_id: h("select", { class: "input" }, h("option", { value: "" }, "— не связан —"),
+      data.members.filter((m) => m.active || (u && u.member_id === m.id)).map((m) => h("option", { value: m.id, selected: u && u.member_id === m.id,
+        disabled: linkedMembers.has(m.id) }, m.name + (m.username ? ` (@${m.username})` : "") + (linkedMembers.has(m.id) ? " — уже связан" : "")))),
   };
-  const admin = h("input", { type: "checkbox", checked: m && m.is_admin });
-  const pm = h("input", { type: "checkbox", checked: m && m.is_pm });
-  const observer = h("input", { type: "checkbox", checked: m && m.is_observer });
-  const active = h("input", { type: "checkbox", checked: !m || m.active });
-  showSheet(h("div", null,
-    h("h2", null, m ? m.name : "Новый участник"),
-    h("div", { class: "card" },
-      field("Имя *", f.name), field("Telegram-ник", f.username), field("Роль", f.role),
-      field("Другие написания", f.aliases), field("Телефон (для обзвона)", f.phone),
-      field("Выполняет задачи за (те же задачи и напоминания)", f.assists_id),
-      h("label", { class: "check" }, admin, "Администратор (загрузка таблиц, любые правки)"),
-      h("label", { class: "check" }, pm, "Получает эскалации и сводку PM"),
-      h("label", { class: "check" }, observer, "Наблюдатель (видит весь проект и получает утреннюю сводку, ничего не меняет)"),
-      h("label", { class: "check" }, active, "Активен"),
-      h("button", { class: "btn block", style: "margin-top:8px", onclick: async () => {
+  const superadmin = h("input", { type: "checkbox", checked: u && u.is_superadmin });
+  const active = h("input", { type: "checkbox", checked: !u || u.active });
+  const password = h("input", { class: "input mono", value: isNew ? randomPassword() : "", placeholder: "не менять" });
+  f.member_id.addEventListener("change", () => {
+    const m = data.members.find((x) => String(x.id) === f.member_id.value);
+    if (m && !f.name.value) f.name.value = m.name;
+    if (m && !f.login.value && m.username) f.login.value = m.username.toLowerCase();
+  });
+  const roleSelects = data.workspaces.map((w) => {
+    const sel = h("select", { class: "input" }, [["", "Нет доступа"], ["viewer", "Наблюдатель"], ["member", "Участник"], ["admin", "Администратор"]]
+      .map(([v, label]) => h("option", { value: v, selected: ((u && u.roles[w.id]) || "") === v }, label)));
+    return [w, sel];
+  });
+  const body = h("div", { class: "user-form" },
+    h("div", { class: "grid2" }, field("Имя", f.name), field("Логин", f.login)),
+    field("Участник команды в Telegram", f.member_id, "Связанный аккаунт входит из бота без пароля и видит свои задачи"),
+    h("div", { class: "form-section" }, "Доступ к пространствам"),
+    h("div", { class: "role-list" }, roleSelects.map(([w, sel]) => h("label", { class: "role-row" }, wsBadge(w, "sm"), h("span", { class: "grow" }, w.name), sel))),
+    h("p", { class: "muted small" }, "Администратор ведёт проекты и любые задачи, участник меняет свои задачи и пишет страницы, наблюдатель только смотрит."),
+    h("div", { class: "form-section" }, "Права и вход"),
+    h("label", { class: "check" }, superadmin, h("span", null, h("b", null, "Главный администратор"), h("span", { class: "muted small block" }, "Управляет пользователями, пространствами, командой и напоминаниями; видит все пространства"))),
+    h("label", { class: "check" }, active, h("span", null, h("b", null, "Аккаунт активен"), h("span", { class: "muted small block" }, "Отключённый человек сразу теряет доступ"))),
+    isNew ? field("Временный пароль", h("div", { class: "inline grow-first" }, password,
+      h("button", { class: "btn sm", type: "button", onclick: () => { password.value = randomPassword(); } }, icon("sync"))),
+    "При первом входе человек сменит его на свой. Можно оставить пустым, если вход только из Telegram") : null,
+    !isNew ? h("div", { class: "inline" }, h("button", { class: "btn sm", onclick: () => resetPassword(u) }, icon("lock"), "Сбросить пароль"),
+      h("span", { class: "muted small" }, u.has_password ? "Выдаст новый временный пароль" : "Пароль ещё не задан — задайте, чтобы человек мог войти из браузера")) : null);
+  const save = h("button", { class: "btn primary" }, isNew ? "Создать" : "Сохранить");
+  const close = modal(isNew ? "Новый пользователь" : u.name, h("div", null, body,
+    h("div", { class: "btn-row end" }, h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"), save)), { wide: true });
+  save.addEventListener("click", async () => {
+    const payload = {
+      name: f.name.value, login: f.login.value, member_id: f.member_id.value ? Number(f.member_id.value) : null,
+      is_superadmin: superadmin.checked, active: active.checked,
+      roles: Object.fromEntries(roleSelects.map(([w, sel]) => [w.id, sel.value])),
+    };
+    if (isNew) payload.password = password.value.trim();
+    save.disabled = true;
+    try {
+      const r = await run(() => (isNew ? api("/api/admin/users", { json: payload })
+        : api(`/api/admin/users/${u.id}`, { method: "PATCH", json: payload })), isNew ? "Пользователь создан" : "Сохранено");
+      close();
+      if (r.data.id === S.boot.me.id) S.boot = await api("/api/bootstrap");
+      if (isNew && payload.password) credentialsModal(r.data, payload.password);
+      renderRoute({ force: true, keepScroll: true });
+    } catch (_) { save.disabled = false; }
+  });
+}
+
+async function resetPassword(u) {
+  if (!(await confirmDialog(`Выдать ${u.name} новый временный пароль? Старый перестанет работать.`, "Сбросить", false))) return;
+  const r = await run(() => api(`/api/admin/users/${u.id}/password`, { json: {} }), "Пароль сброшен");
+  closeAllOverlays();
+  credentialsModal(r.data.user, r.data.password);
+  renderRoute({ force: true, keepScroll: true });
+}
+
+function credentialsModal(u, password) {
+  const link = location.origin + location.pathname;
+  const text = `Кабинет IAC PM: ${link}\nЛогин: ${u.login}\nВременный пароль: ${password}\nПри первом входе нужно задать свой пароль.`;
+  modal("Данные для входа", h("div", null,
+    h("p", { class: "muted" }, "Передайте человеку эти данные. Пароль показывается один раз."),
+    h("div", { class: "creds" },
+      h("div", null, h("span", { class: "muted small" }, "Адрес"), h("div", { class: "mono break" }, link)),
+      h("div", null, h("span", { class: "muted small" }, "Логин"), h("div", { class: "mono" }, u.login)),
+      h("div", null, h("span", { class: "muted small" }, "Временный пароль"), h("div", { class: "mono big" }, password))),
+    h("div", { class: "btn-row end" }, h("button", { class: "btn primary", onclick: () => copyText(text) }, icon("copy"), "Скопировать всё"))));
+}
+
+function workspacesTable(data) {
+  const counts = {};
+  for (const u of data.users) for (const wid of Object.keys(u.roles || {})) counts[wid] = (counts[wid] || 0) + 1;
+  return h("div", { class: "ws-list" }, data.workspaces.map((w) => h("div", { class: "ws-row", onclick: () => workspaceModal(w) },
+    wsBadge(w, "lg"), h("div", { class: "grow" }, h("div", { class: "ws-row-title" }, w.name),
+      h("div", { class: "muted small" }, `${counts[w.id] || 0} ${plural(counts[w.id] || 0, "человек", "человека", "человек")} с доступом`)),
+    h("a", { class: "btn sm ghost", href: `#/w/${w.id}`, onclick: (e) => e.stopPropagation() }, "Открыть"),
+    h("button", { class: "icon-btn", onclick: (e) => { e.stopPropagation(); workspaceModal(w); } }, icon("edit")))));
+}
+
+function workspaceModal(w) {
+  const isNew = !w;
+  let emoji = w ? w.icon : "🏢";
+  const iconBtn = h("button", { class: "emoji-pick", type: "button", onclick: (e) => emojiPicker(e.currentTarget, (x) => { emoji = x; iconBtn.textContent = x || "🏢"; }, true) }, emoji || "🏢");
+  const name = h("input", { class: "input", value: w ? w.name : "", placeholder: "Например, Ивенты 2026" });
+  const close = modal(isNew ? "Новое пространство" : "Пространство", h("div", null,
+    h("div", { class: "inline grow-last" }, iconBtn, name),
+    h("p", { class: "muted small" }, isNew ? "После создания добавьте в него людей в разделе «Пользователи»." : ""),
+    h("div", { class: "btn-row end" }, h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"),
+      h("button", { class: "btn primary", onclick: async () => {
+        await run(() => (isNew ? api("/api/admin/workspaces", { json: { name: name.value, icon: emoji } })
+          : api(`/api/admin/workspaces/${w.id}`, { method: "PATCH", json: { name: name.value, icon: emoji } })), "Сохранено");
+        close();
+        S.boot = await api("/api/bootstrap");
+        renderRoute({ force: true, keepScroll: true });
+      } }, isNew ? "Создать" : "Сохранить"))));
+}
+
+// ---------- команда ----------
+async function viewTeam() {
+  if (!isSuperadmin()) return errorView({ status: 403, message: "Раздел доступен главному администратору" });
+  S.boot = await api("/api/bootstrap");
+  const members = S.boot.members;
+  const flags = (m) => [m.is_admin ? tag("админ", "purple", "sm") : null, m.is_pm ? tag("PM", "blue", "sm") : null,
+    m.is_observer ? tag("наблюдатель", "gray", "sm") : null];
+  return {
+    title: "Команда",
+    crumbs: [{ icon: "👥", label: "Команда" }],
+    body: h("div", { class: "page full" },
+      h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "👥"), h("h1", { class: "page-title" }, "Команда"),
+        h("p", { class: "page-lead" }, "Участники, которым бот пишет в Telegram. Имя должно совпадать с колонкой «Ответственный» в таблице.")),
+      h("div", { class: "db-bar" }, h("div", { class: "db-tabs" }, h("span", { class: "db-tab active" }, icon("table"), h("span", null, `Участники · ${members.filter((m) => m.active).length}`))),
+        h("div", { class: "db-tools" }, h("button", { class: "btn primary sm", onclick: () => memberModal(null) }, "Добавить участника"))),
+      h("div", { class: "table-wrap" }, h("table", { class: "db-table" },
+        h("colgroup", null, [240, 200, 160, 160, 220].map((w) => h("col", { style: { width: w + "px" } }))),
+        h("thead", null, h("tr", null, [["user", "Имя"], ["text", "Роль"], ["phone", "Telegram"], ["status", "Бот"], ["tag", "Права"]]
+          .map(([ic, label]) => h("th", null, h("div", { class: "th" }, icon(ic), h("span", null, label)))))),
+        h("tbody", null, members.map((m) => h("tr", { class: m.active ? "" : "closed", onclick: () => memberModal(m) },
+          h("td", null, h("div", { class: "cell-inner" }, h("span", { class: "person" }, avatar(m.name, m.id, "xs"), m.name))),
+          h("td", null, h("div", { class: "cell-inner muted" }, m.role || "")),
+          h("td", null, h("div", { class: "cell-inner" }, m.username ? "@" + m.username : h("span", { class: "muted" }, "—"))),
+          h("td", null, h("div", { class: "cell-inner" }, !m.active ? statusPill("default", "неактивен")
+            : m.connected ? statusPill("green", "подключён") : statusPill("yellow", "не нажал Start"))),
+          h("td", null, h("div", { class: "cell-inner wrap" }, flags(m),
+            m.assists_id && member(m.assists_id) ? h("span", { class: "muted small" }, "помогает: " + member(m.assists_id).name) : null)))))))),
+  };
+}
+
+function memberModal(m) {
+  const f = {
+    name: h("input", { class: "input", value: m ? m.name : "", placeholder: "Как в колонке «Ответственный»" }),
+    username: h("input", { class: "input", value: m ? m.username : "", placeholder: "ник без @" }),
+    role: h("input", { class: "input", value: m ? m.role : "", placeholder: "Например, дизайнер" }),
+    aliases: h("input", { class: "input", value: m ? m.aliases : "", placeholder: "Другие написания через запятую" }),
+    phone: h("input", { class: "input", type: "tel", value: m ? m.phone : "" }),
+    assists_id: h("select", { class: "input" }, h("option", { value: "" }, "— ни за кого —"),
+      S.boot.members.filter((x) => x.active && (!m || x.id !== m.id)).map((x) => h("option", { value: x.id, selected: m && m.assists_id === x.id }, x.name))),
+  };
+  const checks = {
+    is_admin: [h("input", { type: "checkbox", checked: m && m.is_admin }), "Администратор в боте", "Загрузка таблиц и любые правки из Telegram"],
+    is_pm: [h("input", { type: "checkbox", checked: m && m.is_pm }), "PM", "Получает эскалации и утреннюю сводку"],
+    is_observer: [h("input", { type: "checkbox", checked: m && m.is_observer }), "Наблюдатель", "Видит весь проект и получает сводку, ничего не меняет"],
+    active: [h("input", { type: "checkbox", checked: !m || m.active }), "Активен", "Неактивным бот не пишет"],
+  };
+  const close = modal(m ? m.name : "Новый участник", h("div", null,
+    h("div", { class: "grid2" }, field("Имя", f.name), field("Telegram-ник", f.username)),
+    h("div", { class: "grid2" }, field("Роль", f.role), field("Телефон (для обзвона)", f.phone)),
+    field("Другие написания", f.aliases),
+    field("Выполняет задачи за", f.assists_id, "Получит те же задачи и напоминания"),
+    Object.values(checks).map(([input, title, hint]) => h("label", { class: "check" }, input, h("span", null, h("b", null, title), h("span", { class: "muted small block" }, hint)))),
+    h("div", { class: "btn-row end" }, h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"),
+      h("button", { class: "btn primary", onclick: async () => {
         const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-        Object.assign(body, { id: m ? m.id : null, is_admin: admin.checked, is_pm: pm.checked, is_observer: observer.checked, active: active.checked });
+        Object.assign(body, { id: m ? m.id : null }, Object.fromEntries(Object.entries(checks).map(([k, [input]]) => [k, input.checked])));
         await run(() => api("/api/members", { json: body }), "Сохранено");
-        closeSheet();
-        await reloadBoot();
-        await refresh();
-      } }, "Сохранить"))));
+        close();
+        renderRoute({ force: true, keepScroll: true });
+      } }, "Сохранить"))), { wide: true });
 }
 
-function settingsCard() {
-  const s = state.boot.settings;
+// ---------- напоминания ----------
+async function viewReminders() {
+  if (!isSuperadmin()) return errorView({ status: 403, message: "Раздел доступен главному администратору" });
+  S.boot = await api("/api/bootstrap");
+  const s = S.boot.settings;
   const f = {
-    morning_time: h("input", { type: "time", value: s.morning_time }),
-    pm_time: h("input", { type: "time", value: s.pm_time }),
-    evening_time: h("input", { type: "time", value: s.evening_time }),
-    standup_time: h("input", { type: "time", value: s.standup_time }),
-    checks_per_day: h("input", { type: "number", min: 1, max: 20, value: s.checks_per_day }),
-    sync_minutes: h("input", { type: "number", min: 0, max: 1440, value: s.sync_minutes }),
-    weekly_day: h("select", null, WEEKDAY_NAMES.map((n, i) => h("option", { value: i, selected: String(i) === s.weekly_day }, n))),
+    morning_time: h("input", { class: "input", type: "time", value: s.morning_time }),
+    pm_time: h("input", { class: "input", type: "time", value: s.pm_time }),
+    evening_time: h("input", { class: "input", type: "time", value: s.evening_time }),
+    standup_time: h("input", { class: "input", type: "time", value: s.standup_time }),
+    checks_per_day: h("input", { class: "input", type: "number", min: 1, max: 20, value: s.checks_per_day }),
+    sync_minutes: h("input", { class: "input", type: "number", min: 0, max: 1440, value: s.sync_minutes }),
+    weekly_day: h("select", { class: "input" }, WEEKDAY_NAMES.map((n, i) => h("option", { value: i, selected: String(i) === String(s.weekly_day) }, n))),
   };
-  return h("details", { class: "card" },
-    h("summary", null, "⏰ Напоминания"),
-    h("div", { class: "grid2" },
-      field("Утро: задачи + «выполнено?»", f.morning_time),
-      field("Сводка PM и группе", f.pm_time),
-      field("Вечер: «успеваете?»", f.evening_time),
-      field("Статус-созвон (пусто = нет)", f.standup_time),
-      field("Вопросов «выполнено?» в день", f.checks_per_day),
-      field("Синхронизация, мин", f.sync_minutes)),
-    field("Недельный обзор (задачи без срока)", f.weekly_day),
-    h("p", { class: "hint", style: "margin:0 0 10px" }, s.group_chat_id
-      ? "✅ Рабочая группа подключена — сводки и закрытые задачи уходят туда."
-      : "Группа не подключена: добавьте бота в рабочую группу и отправьте там /bind_group."),
-    h("button", { class: "btn block", onclick: async () => {
-      const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
-      await run(() => api("/api/settings", { json: body }), "Сохранено");
-      await reloadBoot();
-      render();
-    } }, "Сохранить"));
+  return {
+    title: "Напоминания",
+    crumbs: [{ icon: "🔔", label: "Напоминания" }],
+    body: h("div", { class: "page" },
+      h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "🔔"), h("h1", { class: "page-title" }, "Напоминания"),
+        h("p", { class: "page-lead" }, "Когда бот пишет команде в Telegram. Время — по часовому поясу сервера.")),
+      h("div", { class: "settings" },
+        settingsRow("Утро", "Список задач на день и вопрос «выполнено?» по вчерашним срокам", f.morning_time),
+        settingsRow("Сводка PM", "Сводка руководителю, наблюдателям и в рабочую группу", f.pm_time),
+        settingsRow("Вечер", "«Успеваете?» по задачам со сроком завтра", f.evening_time),
+        settingsRow("Статус-созвон", "Напоминание о созвоне; пусто — не напоминать", f.standup_time),
+        settingsRow("Вопросов «выполнено?» в день", "Сколько задач максимум спрашивать у человека за раз", f.checks_per_day),
+        settingsRow("Синхронизация с Google, мин", "0 — не синхронизировать автоматически", f.sync_minutes),
+        settingsRow("Недельный обзор", "День, когда бот напомнит про задачи без срока", f.weekly_day),
+        callout(s.group_chat_id ? "✅" : "💬", s.group_chat_id ? "Рабочая группа подключена — сводки и закрытые задачи уходят туда."
+          : "Группа не подключена: добавьте бота в рабочую группу и отправьте там /bind_group.", s.group_chat_id ? "green" : "gray"),
+        h("div", { class: "btn-row" }, h("button", { class: "btn primary", onclick: async () => {
+          const body = Object.fromEntries(Object.entries(f).map(([k, el]) => [k, el.value]));
+          await run(() => api("/api/settings", { json: body }), "Сохранено");
+          S.boot = await api("/api/bootstrap");
+        } }, "Сохранить")))),
+  };
 }
 
-function newProjectCard() {
-  const name = h("input", { placeholder: "Например, Открытие шоурума" });
-  const date = h("input", { type: "date" });
-  return h("details", { class: "card", open: !state.pid },
-    h("summary", null, "🆕 Новый проект без Excel"),
-    field("Название", name),
-    field("Дата мероприятия", date),
-    h("button", { class: "btn block", onclick: async () => {
-      const r = await run(() => api("/api/projects", { json: { name: name.value, event_date: date.value || null } }), "Проект создан");
-      state.pid = r.data.id;
-      safeStorage("set", "pid", state.pid);
-      await reloadBoot();
-      await refresh();
-    } }, "Создать"));
+// ---------- аккаунт ----------
+async function viewAccount() {
+  const u = S.boot.me;
+  const current = h("input", { class: "input", type: "password", autocomplete: "current-password", placeholder: u.has_password ? "" : "пароль ещё не задан" });
+  const next = h("input", { class: "input", type: "password", autocomplete: "new-password" });
+  const repeat = h("input", { class: "input", type: "password", autocomplete: "new-password" });
+  const theme = store("theme") || "system";
+  const themeSel = h("select", { class: "input", onchange: (e) => { store("theme", e.target.value); applyTheme(); } },
+    [["system", "Как в системе"], ["light", "Светлая"], ["dark", "Тёмная"]].map(([v, label]) => h("option", { value: v, selected: theme === v }, label)));
+  const workspaces = S.boot.workspaces.map((w) => h("div", { class: "role-row" }, wsBadge(w, "sm"), h("span", { class: "grow" }, w.name), tag(ROLE_LABEL[w.role] || w.role, "gray", "sm")));
+  return {
+    title: "Мой аккаунт",
+    crumbs: [{ icon: "👤", label: "Мой аккаунт" }],
+    body: h("div", { class: "page" },
+      h("div", { class: "page-head" }, h("div", { class: "page-icon" }, avatar(u.name, myMemberId(), "xl")), h("h1", { class: "page-title" }, u.name),
+        h("p", { class: "page-lead" }, `Логин: ${u.login}`, u.is_superadmin ? " · главный администратор" : "")),
+      h("div", { class: "settings" },
+        h("h2", { class: "h2" }, "Профиль"),
+        settingsRow("Telegram", u.member ? `Связан с участником «${u.member.name}»${u.member.username ? " (@" + u.member.username + ")" : ""}. Из бота вход без пароля.`
+          : "Не связан. Попросите администратора связать аккаунт, чтобы входить из бота и видеть свои задачи.", null),
+        settingsRow("Оформление", "Светлая или тёмная тема на этом устройстве", themeSel),
+        h("h2", { class: "h2" }, "Пространства"),
+        h("div", { class: "role-list" }, workspaces),
+        h("h2", { class: "h2" }, "Пароль"),
+        h("p", { class: "muted small" }, u.has_password ? "Смена пароля завершит вход на других устройствах." : "Пароль ещё не задан — его выдаёт администратор."),
+        u.has_password ? h("div", { class: "pw-form" }, field("Текущий пароль", current), field("Новый пароль", next, "Минимум 8 символов"), field("Ещё раз", repeat),
+          h("div", { class: "btn-row" }, h("button", { class: "btn primary", onclick: async () => {
+            if (next.value !== repeat.value) { toast("Пароли не совпадают", "error"); return; }
+            await run(() => api("/api/auth/password", { json: { current: current.value, new: next.value } }), "Пароль изменён");
+            current.value = next.value = repeat.value = "";
+          } }, "Сменить пароль"))) : null,
+        h("h2", { class: "h2" }, "Выход"),
+        settingsRow("Выйти из кабинета", "На этом устройстве", h("button", { class: "btn", onclick: logout }, icon("logout"), "Выйти")))),
+  };
 }
 
-init();
+start();

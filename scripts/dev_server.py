@@ -1,8 +1,9 @@
-"""Локальный запуск Mini App без Telegram — для проверки интерфейса в браузере.
+"""Локальный запуск кабинета без Telegram — для проверки интерфейса в браузере.
 
-    DEV_AUTH_USERNAME=s_maxhan python scripts/dev_server.py path/to/table.xlsx
+    python scripts/dev_server.py path/to/table.xlsx
 
-Уведомления не отправляются, а печатаются в консоль. В продакшене DEV_AUTH_USERNAME не задавать!
+Аккаунтам команды задаётся пароль DEV_PASSWORD (по умолчанию devpass123), вход — по Telegram-нику.
+Уведомления не отправляются, а печатаются в консоль. Только для локальной разработки!
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.accounts import hash_password  # noqa: E402
 from app.config import load_config  # noqa: E402
 from app.db import Database  # noqa: E402
 from app.service import Service  # noqa: E402
@@ -32,18 +34,23 @@ class ConsoleNotifier:
 
 
 async def main() -> None:
-    os.environ.setdefault("DEV_AUTH_USERNAME", "s_maxhan")
     config = load_config()
     db = Database(config.data_dir / "dev.sqlite3", config.tz)
     service = Service(db, config, ConsoleNotifier())
     service.seed_team(config.team_file)
+    service.accounts.bootstrap()
+    password = os.environ.get("DEV_PASSWORD", "devpass123")
+    for user in db.list_users():
+        if not user.has_password:
+            db.update_user(user.id, password_hash=hash_password(password))
     if len(sys.argv) > 1:
         path = Path(sys.argv[1])
         await service.import_file(path.read_bytes(), path.name, None)
     runner = web.AppRunner(create_app(service))
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", config.port).start()
-    print(f"Mini App: http://127.0.0.1:{config.port}/  (вход как @{config.dev_auth_username})")
+    logins = ", ".join(u.login for u in db.list_users())
+    print(f"Кабинет: http://127.0.0.1:{config.port}/  логины: {logins}; пароль: {password}")
     await asyncio.Event().wait()
 
 

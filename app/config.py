@@ -30,7 +30,6 @@ class Config:
     tz: ZoneInfo
     team_file: Path
     google_credentials_file: Path | None
-    dev_auth_username: str | None
 
     @property
     def db_path(self) -> Path:
@@ -53,5 +52,4 @@ def load_config() -> Config:
         tz=ZoneInfo(os.environ.get("TIMEZONE", "Asia/Tashkent")),
         team_file=Path(os.environ.get("TEAM_FILE", str(ROOT / "config" / "team.yaml"))),
         google_credentials_file=Path(creds) if creds else None,
-        dev_auth_username=os.environ.get("DEV_AUTH_USERNAME", "").strip() or None,
     )

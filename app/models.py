@@ -163,6 +163,7 @@ class Project:
     last_sync_error: str | None = None
     archived: bool = False
     updated_at: str | None = None
+    workspace_id: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -176,6 +177,7 @@ class Project:
             "last_sync_at": self.last_sync_at,
             "last_sync_error": self.last_sync_error,
             "archived": self.archived,
+            "workspace_id": self.workspace_id,
         }
 
 
@@ -340,6 +342,99 @@ class Call:
             "status": self.status,
             "result": self.result,
         }
+
+
+class AccessError(PermissionError):
+    """Действие запрещено правами пользователя."""
+
+
+# Роли в пространстве: администратор ведёт проекты и любые задачи, участник меняет свои задачи
+# и пишет страницы, наблюдатель только смотрит.
+ADMIN = "admin"
+MEMBER = "member"
+VIEWER = "viewer"
+ROLES = (ADMIN, MEMBER, VIEWER)
+ROLE_LABELS = {ADMIN: "Администратор", MEMBER: "Участник", VIEWER: "Наблюдатель"}
+
+
+@dataclass
+class User:
+    """Аккаунт для входа в рабочее пространство. Создаёт администратор; может быть связан с участником команды."""
+
+    id: int
+    login: str
+    name: str
+    password_hash: str = ""
+    must_change_password: bool = False
+    is_superadmin: bool = False
+    member_id: int | None = None
+    active: bool = True
+    last_login_at: str | None = None
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.password_hash)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "login": self.login,
+            "name": self.name,
+            "is_superadmin": self.is_superadmin,
+            "member_id": self.member_id,
+            "active": self.active,
+            "has_password": self.has_password,
+            "must_change_password": self.must_change_password,
+            "last_login_at": self.last_login_at,
+        }
+
+
+@dataclass
+class Workspace:
+    id: int
+    name: str
+    icon: str = ""
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name, "icon": self.icon}
+
+
+@dataclass
+class Page:
+    """Страница-документ: заголовок, иконка и блоки (абзацы, заголовки, списки, чек-листы…)."""
+
+    id: int
+    workspace_id: int
+    title: str = ""
+    parent_id: int | None = None
+    icon: str = ""
+    content: list = field(default_factory=list)
+    sort_order: int = 0
+    version: int = 1
+    archived: bool = False
+    created_by: str = ""
+    updated_by: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    def to_dict(self, with_content: bool = True) -> dict:
+        data = {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "parent_id": self.parent_id,
+            "title": self.title,
+            "icon": self.icon,
+            "sort_order": self.sort_order,
+            "version": self.version,
+            "archived": self.archived,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if with_content:
+            data["content"] = self.content
+        return data
 
 
 def dumps(value: object) -> str:

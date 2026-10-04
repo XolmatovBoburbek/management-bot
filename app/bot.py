@@ -93,7 +93,7 @@ def build_router(service: Service) -> Router:
         uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без ника"
         await message.answer(
             f"Я не нашёл вас в команде ({texts.e(uname)}).\n"
-            "Попросите администратора добавить ваш Telegram-ник в Mini App → «Команда».")
+            "Попросите администратора добавить ваш Telegram-ник в кабинете → «Команда».")
         return None
 
     async def require_admin(message: Message) -> Member | None:
@@ -106,7 +106,7 @@ def build_router(service: Service) -> Router:
     async def require_project(message: Message) -> Project | None:
         project = service.default_project()
         if not project:
-            await message.answer("Проектов пока нет. Администратор может прислать Excel-файл или создать проект в Mini App.")
+            await message.answer("Проектов пока нет. Администратор может прислать Excel-файл или создать проект в кабинете.")
         return project
 
     async def send_my(chat_id: int, member: Member) -> None:
@@ -149,7 +149,7 @@ def build_router(service: Service) -> Router:
                         await service.notifier.send(
                             pm.telegram_id,
                             f"👤 В бота зашёл человек не из команды: {texts.e(user.full_name)} {texts.e(uname)}.\n"
-                            "Если это новый участник — добавьте его в Mini App → «Команда».")
+                            "Если это новый участник — добавьте его в кабинете → «Команда».")
             return
         if command.args == "my":
             await send_my(message.chat.id, member)
