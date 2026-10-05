@@ -10,3 +10,4 @@ secrets/*
 !secrets/.gitkeep
 .deployed-commit
 .deploy-failed
+.backup-remote

@@ -175,8 +175,8 @@ Google Cloud Console → IAM → Service Accounts → создать → Keys �
    `sudo systemctl start iacpm-update`, выключить: `sudo bash deploy/azure/auto-update.sh --uninstall`.
 
 Обновление вручную: `git pull && docker compose up -d --build`. Логи: `docker compose logs -f bot`.
-Данные (база SQLite и загруженные таблицы) лежат в docker-томе `bot-data`. Бэкап:
-`docker compose cp bot:/data ./backup`.
+Данные (база SQLite и загруженные таблицы) лежат в docker-томе `bot-data`. Ежедневный бэкап в GitHub — в
+разделе «Бэкапы» ниже, разовая копия: `docker compose cp bot:/data ./backup`.
 
 ### Вариант B: Azure App Service (Linux, Python)
 
@@ -195,6 +195,24 @@ HTTPS-адрес `*.azurewebsites.net` выдаётся автоматическ
 Подойдёт любой Linux с Docker: заполните `.env` по образцу [`.env.example`](.env.example) и выполните
 `docker compose up -d --build`. Для быстрой проверки без домена подойдёт туннель
 `cloudflared tunnel --url http://localhost:8080`: полученный https-адрес пропишите в `WEBAPP_URL`.
+
+## Бэкапы
+
+Каждый день в 03:00 по Ташкенту сервер сохраняет **все данные бота** в отдельный **приватный** репозиторий GitHub.
+Сохраняются проекты, задачи, комментарии и история, обзвон, страницы, пользователи (пароли только в виде хешей),
+пространства, команда, настройки и загруженные Excel-файлы. Каждый день — отдельный коммит, поэтому можно вернуться
+к любому дню. Токен бота и другие секреты в бэкап не попадают. Если данные за день не изменились, коммита нет.
+
+Включить (один раз):
+1. На GitHub создайте **приватный** репозиторий, например `iacpm-backup` (без README).
+2. На сервере: `cd ~/management-bot && sudo bash deploy/azure/backup.sh --install git@github.com:ВЛАДЕЛЕЦ/iacpm-backup.git`.
+   Команда напечатает ключ доступа.
+3. В репозитории бэкапов: Settings → Deploy keys → Add deploy key → вставьте ключ, отметьте «Allow write access».
+4. Проверка: `sudo systemctl start iacpm-backup && journalctl -u iacpm-backup -n 20 --no-pager`.
+
+Восстановление описано в `README.md` внутри репозитория бэкапов. Если коротко: `git show КОММИТ:data/db.sql`
+и `docker compose run --rm bot python -m app.backup restore /data/restore.sql --force` при остановленном боте.
+Прежняя база при этом сохраняется рядом.
 
 ## Настройки (`.env`)
 
@@ -227,6 +245,7 @@ python scripts/dev_server.py path/to/table.xlsx   # кабинет на http://1
 - `app/logic.py`: сроки, нагрузка, обзвон, проверка таблицы, черновик сроков;
 - `app/service.py`: действия и уведомления (общие для бота, кабинета и планировщика);
 - `app/accounts.py`: пользователи, пароли (scrypt), сессии, пространства и роли; `app/admin.py` — команды для сервера;
+- `app/backup.py` и `deploy/azure/backup.sh`: дамп базы, восстановление и ежедневная отправка в приватный репозиторий;
 - `app/pages.py`: страницы-документы (блоки, корзина, защита от одновременной правки);
 - `app/scheduler.py`: ежеминутный планировщик рассылок (без дублей и пропусков при перезапуске);
 - `app/bot.py`: команды и кнопки Telegram;
