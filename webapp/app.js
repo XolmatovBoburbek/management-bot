@@ -236,7 +236,10 @@ async function refreshWorkspace() {
 /** Перечитать данные текущего экрана, сохранив прокрутку. Страницу-документ не трогаем — у неё свой редактор. */
 async function reloadView() {
   await refreshWorkspace();
-  if (S.route.name === "page") return;
+  if (S.route.name === "page") {
+    for (const reload of [...S.embeds.values()]) await reload();
+    return;
+  }
   await renderRoute({ force: true, keepScroll: true });
 }
 
@@ -753,6 +756,7 @@ function setSaveState(text, error) {
 }
 
 async function leavePage() {
+  S.embeds.clear();
   const st = S.pageState;
   if (!st) return;
   if (st.dirty) await st.save.flush();
@@ -850,6 +854,8 @@ async function viewPage(params) {
     pageInfo: (id) => pagesById()[id],
     onOpenPage: (id) => go(pageHref(id)),
     onCreateSubpage: () => createPage(st.id, { navigate: false }),
+    pickProject: editable ? pickProject : null,
+    renderEmbed: renderTaskEmbed,
   });
   const linked = new Set(page.content.filter((b) => b.type === "page").map((b) => b.page_id));
   const children = S.ws.pages.filter((p) => p.parent_id === page.id && !linked.has(p.id)).sort((a, b) => a.sort_order - b.sort_order);
@@ -866,6 +872,54 @@ async function viewPage(params) {
     },
   };
   return view;
+}
+
+// ---------- доска задач внутри страницы ----------
+function pickProject(anchor) {
+  return new Promise((resolve) => {
+    const projects = S.ws.projects;
+    if (!projects.length) { toast("В пространстве пока нет проектов", "error"); resolve(null); return; }
+    let picked = false;
+    popMenu(anchor, projects.map((p) => ({ label: p.name, icon: "📁", onClick: () => { picked = true; resolve(p); } })), {
+      title: "Доска какого проекта?", search: projects.length > 6 ? "Найти проект…" : null,
+      onClose: () => setTimeout(() => { if (!picked) resolve(null); }, 0),
+    });
+  });
+}
+
+function renderTaskEmbed(block, el) {
+  const project = S.ws.projects.find((p) => p.id === block.project_id);
+  const title = h("a", { class: "embed-title", href: projectHref(block.project_id) },
+    h("span", { class: "embed-icon" }, "📁"), h("span", null, project ? project.name : "Проект недоступен"), icon("arrow"));
+  const body = h("div", { class: "embed-body" }, h("div", { class: "embed-loading" }, h("div", { class: "spinner" })));
+  fill(el, h("div", { class: "embed-head" }, title), body);
+  if (!project) {
+    fill(body, h("p", { class: "muted small" }, "Проект в архиве или удалён — доску можно убрать через меню блока ⋮⋮."));
+    return;
+  }
+  let loaded = false;
+  const load = async () => {
+    // блок убрали со страницы — больше не обновляем (при первой загрузке страница ещё не в документе)
+    if (loaded && !body.isConnected) { if (S.embeds.get(block.id) === load) S.embeds.delete(block.id); return; }
+    loaded = true;
+    const keep = [...body.querySelectorAll("[data-keep-scroll]")].map((x) => [x.dataset.keepScroll, x.scrollLeft]);
+    try {
+      const d = await api(`/api/projects/${block.project_id}`);
+      fill(body, renderTaskDB({
+        key: "embed:" + block.id, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: d.role === "admin",
+        readOnly: d.role === "viewer", tasksHref: projectHref(d.project.id),
+        defaults: { view: block.view || "board", group: (d.stages || []).length ? "stage" : "status" },
+      }));
+      for (const [key, left] of keep) {
+        const x = body.querySelector(`[data-keep-scroll="${key}"]`);
+        if (x) x.scrollLeft = left;
+      }
+    } catch (err) {
+      fill(body, h("p", { class: "muted small" }, err.message));
+    }
+  };
+  S.embeds.set(block.id, load);
+  load();
 }
 
 function showConflict(st, server, slot) {

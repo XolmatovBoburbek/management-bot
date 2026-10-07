@@ -30,15 +30,18 @@ from app.models import (
     DONE_STATUSES,
     PRIORITIES,
     PROGRESS,
+    STAGE_STATUSES,
     STATUS_LABELS,
     TODO,
     AccessError,
     Call,
     Member,
     Project,
+    Stage,
     Task,
     norm_text,
     normalize_priority,
+    status_category,
 )
 from app.pages import Pages
 
@@ -55,6 +58,9 @@ DEFAULT_SETTINGS = {
     "checks_per_day": "5",
 }
 NUMERIC_SETTINGS = {"sync_minutes": (0, 1440), "checks_per_day": (1, 20), "weekly_day": (0, 6)}
+STAGE_COLORS = {"default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"}
+DEFAULT_STAGES = (("Нужно сделать", "gray", TODO), ("В работе", "blue", PROGRESS), ("Готово", "green", DONE))
+MAX_STAGES = 30
 EDITABLE_TASK_FIELDS = {"title", "block", "description", "priority", "responsible", "start_date", "deadline",
                         "contractor", "status"}
 KEEP_UPLOADS = 5
@@ -299,6 +305,8 @@ class Service:
             fields["fact_date"] = None
         if status == CANCELLED:
             fields.update(blocked=False, blocked_reason="")
+        if task.stage_id and not self._stage_fits(self.db.get_stage(task.stage_id), status):
+            fields["stage_id"] = None  # карточка переедет в колонку, связанную с новым статусом
         updated = self.db.update_task(task.id, **fields)
         self._event(task.id, "status", STATUS_LABELS[status], actor)
         if status in DONE_STATUSES and task.status not in DONE_STATUSES:
@@ -377,8 +385,9 @@ class Service:
         fields = self._clean_fields(data)
         if not fields.get("title"):
             raise ValueError("Укажите название задачи")
-        status = fields.pop("status", TODO)
-        task = self.db.create_task(project.id, status=status, **fields)
+        stage = self._project_stage(project, data.get("stage_id")) if data.get("stage_id") else None
+        status = fields.pop("status", None) or (stage.status if stage and stage.status else TODO)
+        task = self.db.create_task(project.id, status=status, stage_id=stage.id if stage else None, **fields)
         self._event(task.id, "created", "задача создана в боте", actor)
         await self._notify_new_task(task, actor)
         self._queue_write(task)
@@ -413,6 +422,86 @@ class Service:
                         f"📅 Срок изменён: <b>{texts.e(updated.title)}</b>\n"
                         f"Новый срок: {texts.fmt_date(updated.deadline, with_weekday=True)}")
         self._queue_write(updated)
+        return updated
+
+    # ---------- свои колонки доски ----------
+    @staticmethod
+    def _stage_fits(stage: Stage | None, status: str) -> bool:
+        """Может ли задача с таким статусом стоять в этой колонке."""
+        if not stage:
+            return False
+        category = status_category(status)
+        if stage.status:
+            return stage.status == category
+        return category not in (DONE, CANCELLED)
+
+    def _project_stage(self, project: Project, stage_id: object) -> Stage:
+        stage = self.db.get_stage(int(stage_id))  # type: ignore[arg-type]
+        if not stage or stage.project_id != project.id:
+            raise LookupError("Колонка не найдена")
+        return stage
+
+    @staticmethod
+    def _clean_stage(data: dict, partial: bool) -> dict:
+        fields: dict = {}
+        if "title" in data or not partial:
+            title = str(data.get("title") or "").strip()[:60]
+            if not title:
+                raise ValueError("Назовите колонку")
+            fields["title"] = title
+        if "color" in data:
+            fields["color"] = data["color"] if data["color"] in STAGE_COLORS else "gray"
+        if "status" in data:
+            status = data["status"] or ""
+            if status not in STAGE_STATUSES:
+                raise ValueError("Неизвестный статус колонки")
+            fields["status"] = status
+        return fields
+
+    def stages(self, project: Project) -> list[Stage]:
+        return self.db.list_stages(project.id)
+
+    def create_stage(self, project: Project, data: dict, actor: Member) -> list[Stage]:
+        """Новая колонка в конце доски; preset=default — включить колонки «Нужно сделать / В работе / Готово»."""
+        self._require_admin(actor)
+        existing = self.db.list_stages(project.id)
+        if data.get("preset") == "default":
+            if not existing:
+                for title, color, status in DEFAULT_STAGES:
+                    self.db.create_stage(project.id, title, color, status)
+            return self.db.list_stages(project.id)
+        if len(existing) >= MAX_STAGES:
+            raise ValueError(f"На доске уже {MAX_STAGES} колонок")
+        fields = self._clean_stage(data, partial=False)
+        self.db.create_stage(project.id, fields["title"], fields.get("color", "gray"), fields.get("status", ""))
+        return self.db.list_stages(project.id)
+
+    def update_stage(self, stage: Stage, data: dict, actor: Member) -> Stage:
+        self._require_admin(actor)
+        return self.db.update_stage(stage.id, **self._clean_stage(data, partial=True))
+
+    def move_stage(self, stage: Stage, index: object, actor: Member) -> list[Stage]:
+        self._require_admin(actor)
+        ids = [s.id for s in self.db.list_stages(stage.project_id) if s.id != stage.id]
+        position = max(0, min(len(ids), int(index)))  # type: ignore[arg-type]
+        ids.insert(position, stage.id)
+        self.db.reorder_stages(ids)
+        return self.db.list_stages(stage.project_id)
+
+    def delete_stage(self, stage: Stage, actor: Member) -> None:
+        """Задачи не удаляются: они встанут в колонку по своему статусу."""
+        self._require_admin(actor)
+        self.db.delete_stage(stage.id)
+
+    async def move_to_stage(self, task: Task, stage_id: object, actor: Member) -> Task:
+        """Перенос карточки в колонку. Колонка со статусом меняет статус задачи (например, «Готово» закрывает её)."""
+        self.require_task_access(actor, task)
+        stage = self._project_stage(self._project(task), stage_id) if stage_id else None
+        if stage and not self._stage_fits(stage, task.status):
+            task = await self.set_status(task, stage.status or PROGRESS, actor)
+        updated = self.db.update_task(task.id, stage_id=stage.id if stage else None)
+        if stage:
+            self._event(task.id, "stage", f"колонка «{stage.title}»", actor)
         return updated
 
     async def archive_task(self, task: Task, actor: Member) -> None:

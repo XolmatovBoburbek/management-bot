@@ -16,6 +16,7 @@ from app.models import (
     Page,
     Project,
     Risk,
+    Stage,
     Task,
     User,
     Workspace,
@@ -84,9 +85,20 @@ CREATE TABLE IF NOT EXISTS tasks (
     sheet_values_json TEXT DEFAULT '{}',
     archived INTEGER DEFAULT 0,
     created_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    stage_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, archived);
+CREATE TABLE IF NOT EXISTS stages (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    color TEXT DEFAULT 'gray',
+    status TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stages_project ON stages(project_id, sort_order);
 CREATE TABLE IF NOT EXISTS task_events (
     id INTEGER PRIMARY KEY,
     task_id INTEGER NOT NULL,
@@ -241,7 +253,13 @@ def _task_from_row(row: sqlite3.Row) -> Task:
         sheet_values=json.loads(row["sheet_values_json"] or "{}"),
         archived=bool(row["archived"]),
         updated_at=row["updated_at"],
+        stage_id=row["stage_id"],
     )
+
+
+def _stage_from_row(row: sqlite3.Row) -> Stage:
+    return Stage(id=row["id"], project_id=row["project_id"], title=row["title"], color=row["color"] or "gray",
+                 status=row["status"] or "", sort_order=row["sort_order"] or 0)
 
 
 def _member_from_row(row: sqlite3.Row) -> Member:
@@ -375,6 +393,7 @@ class Database:
             ("projects", "workspace_id", "INTEGER"),
             ("task_events", "actor_name", "TEXT DEFAULT ''"),
             ("call_checks", "actor_name", "TEXT DEFAULT ''"),
+            ("tasks", "stage_id", "INTEGER"),
         ):
             if column not in {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -542,22 +561,24 @@ class Database:
 
     def create_task(self, project_id: int, *, title: str, block: str = "", description: str = "",
                     priority: str = "", responsible: str = "", start_date: date | None = None,
-                    deadline: date | None = None, contractor: str = "", status: str = "todo") -> Task:
+                    deadline: date | None = None, contractor: str = "", status: str = "todo",
+                    stage_id: int | None = None) -> Task:
         now = self._now_iso()
         max_order = self.conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM tasks WHERE project_id = ?",
                                       (project_id,)).fetchone()["m"]
         cur = self.conn.execute(
             "INSERT INTO tasks(project_id, title, block, description, priority, responsible, status, start_date, "
-            "deadline, contractor, sort_order, source, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "deadline, contractor, sort_order, source, created_at, updated_at, stage_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project_id, title, block, description, priority, responsible, status, to_iso(start_date),
-             to_iso(deadline), contractor, max_order + 1, "manual", now, now),
+             to_iso(deadline), contractor, max_order + 1, "manual", now, now, stage_id),
         )
         self.conn.commit()
         return self.get_task(cur.lastrowid)  # type: ignore[return-value]
 
     def update_task(self, task_id: int, **fields: object) -> Task:
         allowed = {"title", "block", "description", "priority", "responsible", "status", "start_date", "deadline",
-                   "fact_date", "contractor", "proof", "blocked", "blocked_reason", "eta", "archived"}
+                   "fact_date", "contractor", "proof", "blocked", "blocked_reason", "eta", "archived", "stage_id"}
         sets, values = [], []
         for key, value in fields.items():
             if key not in allowed:
@@ -573,6 +594,43 @@ class Database:
         self.conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", (*values, task_id))
         self.conn.commit()
         return self.get_task(task_id)  # type: ignore[return-value]
+
+    # ---------- колонки доски ----------
+    def list_stages(self, project_id: int) -> list[Stage]:
+        rows = self.conn.execute("SELECT * FROM stages WHERE project_id = ? ORDER BY sort_order, id", (project_id,))
+        return [_stage_from_row(r) for r in rows]
+
+    def get_stage(self, stage_id: int) -> Stage | None:
+        row = self.conn.execute("SELECT * FROM stages WHERE id = ?", (stage_id,)).fetchone()
+        return _stage_from_row(row) if row else None
+
+    def create_stage(self, project_id: int, title: str, color: str = "gray", status: str = "") -> Stage:
+        max_order = self.conn.execute("SELECT COALESCE(MAX(sort_order), 0) AS m FROM stages WHERE project_id = ?",
+                                      (project_id,)).fetchone()["m"]
+        cur = self.conn.execute(
+            "INSERT INTO stages(project_id, title, color, status, sort_order, created_at) VALUES(?,?,?,?,?,?)",
+            (project_id, title, color, status, max_order + 1, self._now_iso()))
+        self.conn.commit()
+        return self.get_stage(cur.lastrowid)  # type: ignore[return-value]
+
+    def update_stage(self, stage_id: int, **fields: object) -> Stage:
+        allowed = {"title", "color", "status"}
+        sets = [f"{key} = ?" for key in fields if key in allowed]
+        values = [value for key, value in fields.items() if key in allowed]
+        if sets:
+            self.conn.execute(f"UPDATE stages SET {', '.join(sets)} WHERE id = ?", (*values, stage_id))
+            self.conn.commit()
+        return self.get_stage(stage_id)  # type: ignore[return-value]
+
+    def reorder_stages(self, ids: list[int]) -> None:
+        for order, stage_id in enumerate(ids, start=1):
+            self.conn.execute("UPDATE stages SET sort_order = ? WHERE id = ?", (order, stage_id))
+        self.conn.commit()
+
+    def delete_stage(self, stage_id: int) -> None:
+        self.conn.execute("UPDATE tasks SET stage_id = NULL WHERE stage_id = ?", (stage_id,))
+        self.conn.execute("DELETE FROM stages WHERE id = ?", (stage_id,))
+        self.conn.commit()
 
     def add_event(self, task_id: int, kind: str, text: str = "", member_id: int | None = None,
                   actor_name: str = "") -> None:

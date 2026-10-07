@@ -1,6 +1,6 @@
 "use strict";
 /* Блочный редактор страниц в стиле Notion.
- * Модель — массив блоков {id, type, rich|text, indent, checked, open, icon, page_id}.
+ * Модель — массив блоков {id, type, rich|text, indent, checked, open, icon, page_id, project_id, view}.
  * Текст хранится сегментами {t, b, i, u, s, c, href} и рисуется через DOM — без innerHTML. */
 
 const BLOCK_DEFS = [
@@ -17,6 +17,7 @@ const BLOCK_DEFS = [
   { type: "code", label: "Код", icon: "</>", hint: "```" },
   { type: "divider", label: "Разделитель", icon: "—", hint: "---" },
   { type: "page", label: "Страница", icon: "📄", hint: "вложенная" },
+  { type: "tasks", label: "Доска задач", icon: "▦", hint: "проект" },
 ];
 const EDITOR_TEXT_TYPES = new Set(["p", "h1", "h2", "h3", "bullet", "number", "todo", "quote", "callout", "toggle"]);
 const LIST_TYPES = new Set(["bullet", "number", "todo", "toggle"]);
@@ -286,6 +287,12 @@ class BlockEditor {
       row.append(h("div", { class: "blk-body" }, h("hr")));
       return row;
     }
+    if (b.type === "tasks") {
+      const body = h("div", { class: "blk-body blk-embed" });
+      row.append(body);
+      if (this.opts.renderEmbed) this.opts.renderEmbed(b, body);
+      return row;
+    }
     if (b.type === "page") {
       const info = this.opts.pageInfo ? this.opts.pageInfo(b.page_id) : null;
       row.append(h("div", { class: "blk-body" }, h("a", {
@@ -513,6 +520,16 @@ class BlockEditor {
         this.emit();
         return;
       }
+      if (prev.type === "tasks") {
+        // доску задач Backspace не удаляет — только через меню блока; пустую строку под ней убираем
+        if (b.type === "p" && !richLen(b.rich) && this.index(b) < this.blocks.length - 1) {
+          const target = this.nextText(b);
+          this.remove(b);
+          if (target) this.focus(target, 0);
+          this.emit();
+        }
+        return;
+      }
       if (prev.type === "code") {
         if (b.type === "p" && !richLen(b.rich)) { this.remove(b); this.focus(prev); this.emit(); }
         return;
@@ -646,7 +663,7 @@ class BlockEditor {
     const s = this.slash;
     const q = s.query.trim().toLowerCase();
     s.items = BLOCK_DEFS.filter((d) => !q || d.label.toLowerCase().includes(q) || d.type.includes(q) || (d.hint && d.hint.includes(q)))
-      .filter((d) => d.type !== "page" || this.opts.onCreateSubpage);
+      .filter((d) => (d.type !== "page" || this.opts.onCreateSubpage) && (d.type !== "tasks" || this.opts.pickProject));
     s.active = Math.min(s.active, Math.max(0, s.items.length - 1));
     fill(s.el, h("div", { class: "menu-title" }, "Блоки"),
       s.items.length ? s.items.map((d, i) => h("button", {
@@ -697,6 +714,16 @@ class BlockEditor {
     b.rich = concatRich(sliceRich(b.rich, 0, s.start), sliceRich(b.rich, Math.max(off, s.start + 1 + s.query.length)));
     const empty = !richLen(b.rich);
     renderRich(el, b.rich);
+    if (def.type === "tasks") {
+      const project = await this.opts.pickProject(this.rows.get(b.id));
+      if (!project) { this.focus(b, "end"); return; }
+      const block = this.newBlock("tasks", { project_id: project.id, view: "board" });
+      if (empty) { this.blocks.splice(this.index(b), 1, block); this.rows.get(b.id).replaceWith(this.renderBlock(block)); this.rows.delete(b.id); this.refresh(); }
+      else this.insertAfter(b, block);
+      this.focus(this.insertAfter(block, this.newBlock("p")), 0);
+      this.emit();
+      return;
+    }
     if (def.type === "page") {
       const page = await this.opts.onCreateSubpage();
       if (!page) return;

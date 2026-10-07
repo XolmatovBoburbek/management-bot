@@ -28,7 +28,7 @@ const WEEKDAY_NAMES = ["Понедельник", "Вторник", "Среда",
 const AVATAR_COLORS = ["#e16259", "#d9730d", "#cb912f", "#448361", "#337ea9", "#9065b0", "#c14c8a", "#787774"];
 const EVENT_ICONS = {
   status: "🔄", comment: "💬", problem: "🆘", resolved: "✔️", checkin: "👍", eta: "🗓", edit: "✏️",
-  created: "➕", archived: "🗑", call: "📞",
+  created: "➕", archived: "🗑", call: "📞", stage: "🗂",
 };
 const ROLE_LABEL = { admin: "Администратор", member: "Участник", viewer: "Наблюдатель" };
 
@@ -43,6 +43,7 @@ const S = {
   sidebarOpen: false,
   peek: null,          // id открытой задачи
   overlays: [],
+  embeds: new Map(),   // доски задач внутри открытой страницы: id блока → перезагрузка
 };
 
 // ---------- DOM ----------
@@ -406,7 +407,7 @@ function popMenu(anchor, items, opts = {}) {
     item.checked ? h("span", { class: "menu-check" }, "✓") : null));
   }
   const layer = h("div", { class: "menu-layer", onmousedown: (e) => { if (e.target === layer) close(); } }, list);
-  close = pushOverlay(layer);
+  close = pushOverlay(layer, opts.onClose);
   placeNear(list, anchor);
   return close;
 }

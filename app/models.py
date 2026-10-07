@@ -207,6 +207,7 @@ class Task:
     sheet_values: dict = field(default_factory=dict)
     archived: bool = False
     updated_at: str | None = None
+    stage_id: int | None = None
 
     @property
     def is_critical(self) -> bool:
@@ -251,7 +252,31 @@ class Task:
             "blocked_reason": self.blocked_reason,
             "eta": to_iso(self.eta),
             "source": self.source,
+            "stage_id": self.stage_id,
         }
+
+
+# Свои колонки доски (как списки в Trello). Колонка может быть связана со статусом: перенос карточки
+# в «Готово» закрывает задачу, а закрытая в боте задача сама уезжает в такую колонку.
+STAGE_STATUSES = ("", TODO, PROGRESS, DONE, CANCELLED)
+
+
+def status_category(status: str) -> str:
+    return DONE if status in (DONE, DONE_LATE) else status
+
+
+@dataclass
+class Stage:
+    id: int
+    project_id: int
+    title: str
+    color: str = "gray"
+    status: str = ""
+    sort_order: int = 0
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "project_id": self.project_id, "title": self.title, "color": self.color,
+                "status": self.status, "sort_order": self.sort_order}
 
 
 @dataclass

@@ -176,6 +176,16 @@ def _page(request: web.Request):
     return page, role
 
 
+def _stage(request: web.Request):
+    service = _service(request)
+    stage = service.db.get_stage(_int(request, "sid"))
+    project = service.db.get_project(stage.project_id) if stage else None
+    role = _role(request, project.workspace_id) if project else None
+    if not stage or not role:
+        raise LookupError("Колонка не найдена")
+    return stage, project, role
+
+
 def _call(request: web.Request):
     service = _service(request)
     call = service.db.get_call(_int(request, "cid"))
@@ -363,6 +373,7 @@ async def project_data(request: web.Request) -> web.Response:
         "milestones": [m.to_dict(project.event_date) for m in milestones],
         "risks": [r.to_dict() for r in service.db.list_risks(project.id)],
         "audit": logic.audit(project, tasks, team, milestones, today) if actor.sees_all else [],
+        "stages": [s.to_dict() for s in service.stages(project)],
     })
 
 
@@ -482,6 +493,7 @@ async def task_detail(request: web.Request) -> web.Response:
     data = _task_dict(task, today, team, my_ids, actor)
     data["workspace_id"] = project.workspace_id
     data["project_name"] = project.name
+    data["stages"] = [s.to_dict() for s in service.stages(project)]
     data["events"] = service.db.task_events(task.id)
     data["calls"] = [c.to_dict() for c in service.db.list_calls(task.project_id, include_done=True)
                      if c.task_id == task.id]
@@ -537,6 +549,43 @@ async def task_delete(request: web.Request) -> web.Response:
     service = _service(request)
     task, _, role = _task(request)
     await service.archive_task(task, _actor(request, role))
+    return _ok()
+
+
+async def task_stage(request: web.Request) -> web.Response:
+    service = _service(request)
+    task, _, role = _task(request)
+    body = await _json(request)
+    updated = await service.move_to_stage(task, body.get("stage_id"), _actor(request, role))
+    return _ok(updated.to_dict(service.today()))
+
+
+# ---------- свои колонки доски ----------
+async def stage_create(request: web.Request) -> web.Response:
+    service = _service(request)
+    project, role = _project(request)
+    stages = service.create_stage(project, await _json(request), _actor(request, role))
+    return _ok([s.to_dict() for s in stages])
+
+
+async def stage_update(request: web.Request) -> web.Response:
+    service = _service(request)
+    stage, _, role = _stage(request)
+    return _ok(service.update_stage(stage, await _json(request), _actor(request, role)).to_dict())
+
+
+async def stage_move(request: web.Request) -> web.Response:
+    service = _service(request)
+    stage, _, role = _stage(request)
+    body = await _json(request)
+    stages = service.move_stage(stage, body.get("index", 0), _actor(request, role))
+    return _ok([s.to_dict() for s in stages])
+
+
+async def stage_delete(request: web.Request) -> web.Response:
+    service = _service(request)
+    stage, _, role = _stage(request)
+    service.delete_stage(stage, _actor(request, role))
     return _ok()
 
 
@@ -780,6 +829,11 @@ def create_app(service: Service) -> web.Application:
     r.add_post("/api/tasks/{tid:\\d+}/comment", task_comment)
     r.add_post("/api/tasks/{tid:\\d+}/problem", task_problem)
     r.add_post("/api/tasks/{tid:\\d+}/resolve", task_resolve)
+    r.add_post("/api/tasks/{tid:\\d+}/stage", task_stage)
+    r.add_post("/api/projects/{pid:\\d+}/stages", stage_create)
+    r.add_patch("/api/stages/{sid:\\d+}", stage_update)
+    r.add_post("/api/stages/{sid:\\d+}/move", stage_move)
+    r.add_delete("/api/stages/{sid:\\d+}", stage_delete)
 
     r.add_get("/api/pages/{page_id:\\d+}", page_get)
     r.add_put("/api/pages/{page_id:\\d+}", page_save)

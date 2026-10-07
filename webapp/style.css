@@ -601,6 +601,23 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .composer-input { width: 100%; border: 0; outline: none; resize: none; background: transparent; font-size: 14px; font-weight: 500; line-height: 1.45; min-height: 42px; }
 .composer-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 
+/* свои колонки: заголовок двигается мышью или пальцем, «+ Добавить колонку» в конце */
+.board-col-head.movable { cursor: grab; border-radius: 6px; user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+.board-col-head.movable:hover { background: var(--hover); }
+.col-status { display: inline-flex; align-items: center; }
+.board-col-head .col-more { opacity: 0; }
+.board-col:hover .board-col-head .col-more { opacity: 1; }
+.board-col.drag-src { display: none; }
+.col-placeholder { flex: 0 0 272px; width: 272px; border-radius: 10px; background: var(--hover-strong); box-shadow: inset 0 0 0 1px var(--border); }
+.board-col.add-col { background: transparent; padding: 6px 0; }
+.add-col-btn {
+  display: flex; align-items: center; gap: 6px; width: 100%; height: 38px; padding: 0 12px; border-radius: 10px;
+  color: var(--text-3); background: var(--hover); font-size: 14px; font-weight: 500;
+}
+.add-col-btn .ico { width: 16px; height: 16px; }
+.add-col-btn:hover { background: var(--hover-strong); color: var(--text-2); }
+.add-col-form { padding: 8px; border-radius: 10px; background: var(--c-default-col); }
+
 /* ---------- таблица ---------- */
 .table-wrap { overflow-x: auto; margin: 0 calc(-1 * var(--pad)); padding: 0 var(--pad); }
 .db-table { border-collapse: collapse; table-layout: fixed; min-width: 100%; font-size: 14px; }
@@ -947,6 +964,17 @@ button.stat:hover { background: var(--hover); }
 .blk-btn.drag { cursor: grab; touch-action: none; }
 .editor-tail { min-height: 120px; cursor: text; }
 .drop-line { position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: rgba(35, 131, 226, .45); pointer-events: none; z-index: 2; }
+.blk-body.blk-embed { display: block; padding: 6px 0 14px; font-size: 14px; line-height: 1.5; }
+.blk-tasks .blk-handle { top: 8px; }
+.embed-head { display: flex; align-items: center; min-height: 32px; }
+.embed-title { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; padding: 2px 6px; margin-left: -6px; border-radius: 6px; }
+.embed-title:hover { background: var(--hover); }
+.embed-title > .ico { width: 16px; height: 16px; color: var(--text-3); opacity: 0; transition: opacity .12s; }
+.embed-title:hover > .ico { opacity: 1; }
+.embed-icon { font-size: 18px; line-height: 1; }
+.embed-loading { display: flex; justify-content: center; padding: 28px 0; }
+.blk-embed .db-bar { position: static; margin-top: 2px; }
+.blk-embed .empty { padding: 28px 16px; }
 .subpages { display: flex; flex-direction: column; margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
 .conflict-slot:empty { display: none; }
 .conflict-slot { position: sticky; top: 0; z-index: 3; padding-top: 12px; background: var(--bg); }

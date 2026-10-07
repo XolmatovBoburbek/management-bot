@@ -104,6 +104,157 @@ function countFilters(cfg) {
 
 function blocksOf(tasks) { return uniq(tasks.map((t) => t.block).filter(Boolean)); }
 
+// ---------- свои колонки доски (как списки в Trello) ----------
+const STAGE_STATUS_OPTIONS = [["", "Без статуса — просто этап"], ["todo", "Не начата"], ["progress", "В работе"],
+  ["done", "Выполнена"], ["cancelled", "Отменена"]];
+
+function stageCategory(status) { return status === "done_late" ? "done" : status; }
+
+function stageFits(stage, status) {
+  const c = stageCategory(status);
+  return stage.status ? stage.status === c : !["done", "cancelled"].includes(c);
+}
+
+/** В какой колонке стоит карточка: своя колонка, если подходит по статусу, иначе колонка, связанная со статусом. */
+function stageOf(t, stages) {
+  if (!stages || !stages.length) return null;
+  const own = t.stage_id && stages.find((st) => st.id === t.stage_id);
+  if (own && stageFits(own, t.raw_status)) return own;
+  return stages.find((st) => st.status && st.status === stageCategory(t.raw_status)) || null;
+}
+
+function hasStages(ctx) { return !!(ctx.stages && ctx.stages.length); }
+
+/** Группировка доски с учётом того, включены ли свои колонки. */
+function boardGroup(cfg, ctx) {
+  if (cfg.group === "stage") return hasStages(ctx) ? "stage" : "status";
+  return cfg.group;
+}
+
+async function moveToStage(t, stageId) {
+  await run(() => api(`/api/tasks/${t.id}/stage`, { json: { stage_id: stageId } }), "Карточка перенесена");
+  await taskChanged();
+}
+
+function editStage(anchor, t, stages) {
+  const current = stageOf(t, stages);
+  popMenu(anchor, stages.map((st) => ({
+    label: tag(st.title, st.color), checked: current && current.id === st.id, onClick: () => moveToStage(t, st.id),
+  })), { title: "Колонка" });
+}
+
+async function stageCall(action, message) {
+  await run(action, message);
+  await taskChanged();
+}
+
+async function enableStages(ctx, cfg) {
+  if (!isWsAdmin()) { toast("Свои колонки включает администратор пространства"); return; }
+  await run(() => api(`/api/projects/${ctx.project.id}/stages`, { json: { preset: "default" } }), "Свои колонки включены — их можно переименовать и добавить новые");
+  cfg.group = "stage";
+  saveDb(ctx.key, cfg);
+  await taskChanged();
+}
+
+function stageMenu(anchor, stage, ctx) {
+  const index = ctx.stages.findIndex((st) => st.id === stage.id);
+  const move = (to) => stageCall(() => api(`/api/stages/${stage.id}/move`, { json: { index: to } }));
+  popMenu(anchor, [
+    { label: "Переименовать", icon: "edit", onClick: async () => {
+      const title = await promptDialog("Колонка", "Название", stage.title);
+      if (title && title.trim()) await stageCall(() => api(`/api/stages/${stage.id}`, { method: "PATCH", json: { title } }), "Переименовано");
+    } },
+    { label: "Цвет", icon: "sparkle", onClick: () => popMenu(anchor, ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red", "default"]
+      .map((color) => ({ label: tag(stage.title, color), checked: stage.color === color,
+        onClick: () => stageCall(() => api(`/api/stages/${stage.id}`, { method: "PATCH", json: { color } })) })), { title: "Цвет колонки" }) },
+    { label: "Статус карточек", icon: "status", hint: stage.status ? STATUS[stage.status].label : "нет", onClick: () => popMenu(anchor,
+      STAGE_STATUS_OPTIONS.map(([value, label]) => ({ label: value ? statusTag(value) : label, checked: stage.status === value,
+        onClick: () => stageCall(() => api(`/api/stages/${stage.id}`, { method: "PATCH", json: { status: value } }), "Сохранено") })),
+      { title: "Карточка в этой колонке получает статус" }) },
+    index > 0 ? { label: "Сдвинуть влево", icon: "left", onClick: () => move(index - 1) } : null,
+    index < ctx.stages.length - 1 ? { label: "Сдвинуть вправо", icon: "chevron", onClick: () => move(index + 1) } : null,
+    { divider: true },
+    { label: "Удалить колонку", icon: "trash", danger: true, onClick: async () => {
+      if (!(await confirmDialog(`Удалить колонку «${stage.title}»? Карточки не удалятся — они встанут в колонки по своему статусу.`, "Удалить"))) return;
+      await stageCall(() => api(`/api/stages/${stage.id}`, { method: "DELETE" }), "Колонка удалена");
+    } },
+  ], { title: stage.title });
+}
+
+/** «+ Добавить колонку» в конце доски. Если своих колонок ещё нет — включает их и добавляет новую. */
+function addColumnSlot(ctx, cfg) {
+  const slot = h("div", { class: "board-col add-col" });
+  const show = () => fill(slot, h("button", { class: "add-col-btn", onclick: open }, icon("plus"), "Добавить колонку"));
+  function open() {
+    const input = h("input", { class: "input", placeholder: "Название колонки, например «Съёмка»" });
+    const submit = async () => {
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      input.disabled = true;
+      try {
+        if (!hasStages(ctx)) await api(`/api/projects/${ctx.project.id}/stages`, { json: { preset: "default" } });
+        await run(() => api(`/api/projects/${ctx.project.id}/stages`, { json: { title } }), "Колонка добавлена");
+        cfg.group = "stage";
+        saveDb(ctx.key, cfg);
+        S.reopenAddColumn = ctx.key;
+        await taskChanged();
+      } catch (_) {
+        input.disabled = false;
+        input.focus();
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submit();
+      if (e.key === "Escape") show();
+    });
+    fill(slot, h("div", { class: "add-col-form" }, input, h("div", { class: "composer-actions" },
+      h("button", { class: "btn primary sm", onmousedown: (e) => e.preventDefault(), onclick: submit }, "Добавить колонку"),
+      h("button", { class: "icon-btn", onclick: show, "aria-label": "Отмена" }, icon("close")))));
+    setTimeout(() => input.focus(), 0);
+  }
+  if (S.reopenAddColumn === ctx.key) { S.reopenAddColumn = null; open(); } else show();
+  return slot;
+}
+
+/** Перетаскивание колонки за заголовок (администратор). Клик по заголовку — меню колонки. */
+function columnDrag(colEl, head, stage, ctx, board) {
+  let ghost = null;
+  let placeholder = null;
+  let scroll = null;
+  return {
+    canDrag: () => isWsAdmin() && !ctx.readOnly,
+    onClick: () => { if (isWsAdmin() && !ctx.readOnly) stageMenu(head, stage, ctx); },
+    onStart(x, y) {
+      ghost = makeGhost(colEl, x, y);
+      placeholder = h("div", { class: "col-placeholder", style: { height: colEl.offsetHeight + "px" } });
+      colEl.after(placeholder);
+      colEl.classList.add("drag-src");
+      document.body.classList.add("is-dragging");
+      scroll = autoScroll(board);
+      this.onMove(x, y);
+    },
+    onMove(x, y) {
+      ghost.move(x, y);
+      scroll.update(x, y);
+      const cols = [...board.querySelectorAll(".board-col[data-stage]:not(.drag-src)")];
+      const before = cols.find((c) => { const r = c.getBoundingClientRect(); return x < r.left + r.width / 2; });
+      if (before) board.insertBefore(placeholder, before);
+      else if (cols.length) cols[cols.length - 1].after(placeholder);
+    },
+    async onDrop(x, y, cancelled) {
+      scroll.stop();
+      ghost.remove();
+      document.body.classList.remove("is-dragging");
+      const order = [...board.querySelectorAll(".board-col[data-stage]:not(.drag-src), .col-placeholder")];
+      const index = order.indexOf(placeholder);
+      colEl.classList.remove("drag-src");
+      placeholder.replaceWith(colEl);
+      if (cancelled || index < 0 || index === ctx.stages.findIndex((st) => st.id === stage.id)) return;
+      await stageCall(() => api(`/api/stages/${stage.id}/move`, { json: { index } }));
+    },
+  };
+}
+
 function peopleOf(tasks) {
   const ids = uniq(tasks.flatMap((t) => t.assignee_ids || []));
   return ids.map(member).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, "ru"));
@@ -307,9 +458,12 @@ function enableDrag(el, handlers) {
     let moved = false;
     let timer = null;
     const preventScroll = (ev) => { if (dragging && ev.cancelable) ev.preventDefault(); };
+    if (!touch && allowed) e.preventDefault();  // мышью: не начинать выделение текста при перетаскивании
     const begin = () => {
       dragging = true;
       el.classList.remove("drag-armed");
+      const selection = window.getSelection();
+      if (selection) selection.removeAllRanges();
       document.addEventListener("touchmove", preventScroll, { passive: false });
       if (touch) { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium"); } catch (_) { /* старый клиент */ } }
       handlers.onStart(last.x, last.y);
@@ -436,7 +590,7 @@ function dbTools(ctx, cfg, draw, drawBody) {
   input.addEventListener("blur", () => { if (!input.value) wrap.classList.remove("open"); });
   input.addEventListener("keydown", (e) => { if (e.key === "Escape") { input.value = ""; cfg.q = ""; drawBody(); input.blur(); } });
   const filters = countFilters(cfg);
-  const group = GROUP_BY.find((g) => g.id === cfg.group) || GROUP_BY[0];
+  const group = boardGroup(cfg, ctx) === "stage" ? { label: "Свои колонки" } : GROUP_BY.find((g) => g.id === cfg.group) || GROUP_BY[0];
   const sort = SORTS.find((x) => x.id === cfg.sort);
   return h("div", { class: "db-tools" },
     h("button", { class: "db-tool" + (filters ? " active" : ""), title: "Фильтр", onclick: (e) => filterMenu(e.currentTarget, ctx, cfg, draw) },
@@ -444,9 +598,14 @@ function dbTools(ctx, cfg, draw, drawBody) {
     h("button", { class: "db-tool" + (cfg.sort ? " active" : ""), title: "Сортировка", onclick: (e) => popMenu(e.currentTarget,
       SORTS.map((x) => ({ label: x.label, checked: cfg.sort === x.id, onClick: () => { cfg.sort = x.id; draw(); } })), { title: "Сортировка" }) },
     icon("sort"), cfg.sort && sort ? h("span", null, sort.label) : null),
-    cfg.view === "board" ? h("button", { class: "db-tool", title: "Группировать карточки", onclick: (e) => popMenu(e.currentTarget,
-      GROUP_BY.map((g) => ({ label: g.label, icon: g.icon, checked: cfg.group === g.id, onClick: () => { cfg.group = g.id; draw(); } })),
-      { title: "Группировать по" }) }, icon("group"), h("span", null, group.label)) : null,
+    cfg.view === "board" ? h("button", { class: "db-tool", title: "Группировать карточки", onclick: (e) => popMenu(e.currentTarget, [
+      ctx.project && (hasStages(ctx) || isWsAdmin()) ? {
+        label: hasStages(ctx) ? "Свои колонки" : "Свои колонки — включить", icon: "board", checked: boardGroup(cfg, ctx) === "stage",
+        hint: hasStages(ctx) ? "" : "как в Trello",
+        onClick: () => { if (hasStages(ctx)) { cfg.group = "stage"; draw(); } else enableStages(ctx, cfg); },
+      } : null,
+      ...GROUP_BY.map((g) => ({ label: g.label, icon: g.icon, checked: boardGroup(cfg, ctx) === g.id, onClick: () => { cfg.group = g.id; draw(); } })),
+    ], { title: "Группировать по" }) }, icon("group"), h("span", null, group.label)) : null,
     wrap,
     ctx.canCreate ? h("button", { class: "btn primary sm new-btn", onclick: () => openTaskForm(null, ctx.project) }, "Новая") : null);
 }
@@ -534,6 +693,13 @@ function dbBody(tasks, ctx, cfg, draw) {
 // ---------- доска ----------
 function boardColumns(tasks, ctx, cfg) {
   const all = ctx.tasks;
+  if (cfg.group === "stage") {
+    const cols = ctx.stages.map((st) => ({ key: "s" + st.id, stage: st, label: st.title, color: st.color || "gray", value: st.id,
+      create: true, tasks: tasks.filter((t) => (stageOf(t, ctx.stages) || {}).id === st.id) }));
+    const loose = tasks.filter((t) => !stageOf(t, ctx.stages));
+    if (loose.length) cols.push({ key: "none", label: "Без колонки", color: "default", value: null, tasks: loose });
+    return cols;
+  }
   if (cfg.group === "priority") {
     return [...PRIORITIES.map((p) => ({ key: p, label: p, color: PRIORITY_COLOR[p], value: p, always: true })),
       { key: "", label: "Без приоритета", color: "default", value: "" }]
@@ -557,16 +723,18 @@ function boardColumns(tasks, ctx, cfg) {
     .filter((c) => c.always || c.tasks.length);
 }
 
-function boardView(tasks, ctx, cfg) {
+function boardView(tasks, ctx, cfgIn) {
+  const cfg = { ...cfgIn, group: boardGroup(cfgIn, ctx) };
   const cols = boardColumns(tasks, ctx, cfg);
   const board = h("div", { class: "board", dataset: { keepScroll: "board-" + ctx.key } });
   for (const col of cols) board.append(boardColumn(col, ctx, cfg, board, cols));
+  if (ctx.project && isWsAdmin() && !ctx.readOnly && ["stage", "status"].includes(cfg.group)) board.append(addColumnSlot(ctx, cfgIn));
   if (!tasks.length) board.append(h("div", { class: "board-empty" }, "По фильтрам ничего не найдено"));
   return board;
 }
 
 function canDropInto(col, cfg, ctx) {
-  if (cfg.group === "status") return col.value !== null && col.value !== undefined;
+  if (cfg.group === "status" || cfg.group === "stage") return col.value !== null && col.value !== undefined;
   return isWsAdmin() && !ctx.readOnly;
 }
 
@@ -576,10 +744,15 @@ function boardColumn(col, ctx, cfg, board, cols) {
     ? h("span", { class: "col-person" }, avatar(col.person.name, col.person.id, "xs"), col.person.name)
     : cfg.group === "status" ? statusPill(col.color, col.label) : tag(col.label, col.color);
   const list = h("div", { class: "board-cards" });
-  const colEl = h("div", { class: `board-col c-${col.color}`, dataset: { key: col.key, drop: canDropInto(col, cfg, ctx) ? "1" : "" } },
-    h("div", { class: "board-col-head" }, label, h("span", { class: "board-count" }, col.tasks.length), h("span", { class: "grow" }),
-      creatable ? h("button", { class: "icon-btn sm", title: "Добавить карточку", onclick: () => colEl.querySelector(".board-add") && colEl.querySelector(".board-add").click() }, icon("plus")) : null),
-    list);
+  const stageHint = col.stage && col.stage.status ? `Карточки здесь получают статус «${STATUS[col.stage.status].label}»` : null;
+  const head = h("div", { class: "board-col-head" + (col.stage && isWsAdmin() && !ctx.readOnly ? " movable" : ""), title: stageHint },
+    label, col.stage && col.stage.status ? h("span", { class: "col-status" }, statusDot(col.stage.status)) : null,
+    h("span", { class: "board-count" }, col.tasks.length), h("span", { class: "grow" }),
+    col.stage && isWsAdmin() && !ctx.readOnly ? h("button", { class: "icon-btn sm col-more", title: "Настроить колонку", onclick: (e) => stageMenu(e.currentTarget, col.stage, ctx) }, icon("more")) : null,
+    creatable ? h("button", { class: "icon-btn sm", title: "Добавить карточку", onclick: () => colEl.querySelector(".board-add") && colEl.querySelector(".board-add").click() }, icon("plus")) : null);
+  const colEl = h("div", { class: `board-col c-${col.color}`, dataset: { key: col.key, drop: canDropInto(col, cfg, ctx) ? "1" : "", ...(col.stage ? { stage: col.stage.id } : {}) } },
+    head, list);
+  if (col.stage) enableDrag(head, columnDrag(colEl, head, col.stage, ctx, board));
   for (const t of col.tasks) list.append(boardCard(t, ctx, cfg, colEl, board, cols));
   if (creatable) colEl.append(cardComposer(col, ctx, cfg));
   return colEl;
@@ -610,7 +783,7 @@ function boardCard(t, ctx, cfg, colEl, board, cols) {
   let placeholder = null;
   let scroll = null;
   enableDrag(card, {
-    canDrag: () => !ctx.readOnly && (cfg.group === "status" ? t.can_edit : isWsAdmin()),
+    canDrag: () => !ctx.readOnly && (cfg.group === "status" || cfg.group === "stage" ? t.can_edit : isWsAdmin()),
     onClick: () => openPeek(t.id),
     onStart(x, y) {
       ghost = makeGhost(card, x, y);
@@ -657,6 +830,10 @@ function boardCard(t, ctx, cfg, colEl, board, cols) {
 }
 
 async function moveTask(t, col, group) {
+  if (group === "stage") {
+    await moveToStage(t, col.value);
+    return;
+  }
   if (group === "status") {
     await run(() => api(`/api/tasks/${t.id}/status`, { json: { status: col.value } }), STATUS_TOAST[col.value]);
     if (t.status === "overdue" && ["todo", "progress"].includes(col.value)) {
@@ -670,6 +847,7 @@ async function moveTask(t, col, group) {
 }
 
 function groupFields(group, col) {
+  if (group === "stage") return { stage_id: col.value };
   if (group === "status") return { status: col.value };
   if (group === "priority") return { priority: col.value };
   if (group === "block") return { block: col.value };
@@ -717,6 +895,7 @@ function tableColumns(ctx) {
   return [
     { id: "title", label: "Название", icon: "text", w: 300 },
     { id: "status", label: "Статус", icon: "status", w: 150 },
+    hasStages(ctx) ? { id: "stage", label: "Колонка", icon: "board", w: 160 } : null,
     { id: "assignee", label: "Ответственный", icon: "user", w: 190 },
     { id: "deadline", label: "Срок", icon: "calendar", w: 130 },
     { id: "priority", label: "Приоритет", icon: "flag", w: 120 },
@@ -743,6 +922,12 @@ function tableView(tasks, ctx) {
         td.addEventListener("click", () => openPeek(t.id));
         return td;
       case "status": value = statusTag(t.status); if (t.can_edit && !ctx.readOnly) edit = (a) => editStatus(a, t); break;
+      case "stage": {
+        const st = stageOf(t, ctx.stages);
+        value = st ? tag(st.title, st.color) : null;
+        if (t.can_edit && !ctx.readOnly) edit = (a) => editStage(a, t, ctx.stages);
+        break;
+      }
       case "assignee": value = personChips(t); if (admin) edit = (a) => editAssignee(a, t); break;
       case "deadline": value = t.deadline ? h("span", { class: t.status === "overdue" ? "text-red" : "" }, fmtDate(t.deadline)) : null;
         if (admin) edit = (a) => editDate(a, t, "deadline"); break;
@@ -825,6 +1010,7 @@ function listRow(t, ctx) {
         t.block ? h("span", null, t.block) : null,
         t.contractor ? h("span", null, t.contractor) : null)),
     h("div", { class: "list-props" },
+      hasStages(ctx) && stageOf(t, ctx.stages) ? tag(stageOf(t, ctx.stages).title, stageOf(t, ctx.stages).color, "sm") : null,
       t.blocked && isOpen(t) ? tag("Нужна помощь", "red", "sm") : null,
       t.raw_status === "progress" && isOpen(t) ? statusTag("progress") : null,
       t.priority ? tag(t.priority, PRIORITY_COLOR[t.priority], "sm") : null,
@@ -971,6 +1157,8 @@ function peekContent(t) {
 
   const props = h("div", { class: "props" },
     prop("status", "Статус", statusTag(t.status), t.can_edit ? (a) => editStatus(a, t) : null),
+    t.stages && t.stages.length ? prop("board", "Колонка", stageOf(t, t.stages) ? tag(stageOf(t, t.stages).title, stageOf(t, t.stages).color) : null,
+      t.can_edit ? (a) => editStage(a, t, t.stages) : null) : null,
     prop("user", "Ответственный", owners.length
       ? h("span", { class: "person-chips" }, owners.map((m) => h("span", { class: "person" }, avatar(m.name, m.id, "xs"), m.name,
         m.username ? h("a", { class: "person-link", href: "https://t.me/" + m.username, target: "_blank", rel: "noopener", onclick: (e) => e.stopPropagation() }, "@" + m.username) : null)))
@@ -1285,7 +1473,8 @@ async function viewProject(params) {
   const section = params.section || "tasks";
   if (section === "settings" && !isWsAdmin()) { go(projectHref(pid)); return null; }
   const ctx = {
-    key: "p:" + pid, tasks: d.tasks, project: d.project, canCreate: isWsAdmin(), readOnly: d.role === "viewer",
+    key: "p:" + pid, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: isWsAdmin(), readOnly: d.role === "viewer",
+    defaults: { group: (d.stages || []).length ? "stage" : "status" },
     extraTabs: projectTabsFor(pid), tasksHref: projectHref(pid), noMine: d.role === "viewer" && !S.boot.me.member,
   };
   let body;

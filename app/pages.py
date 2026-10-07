@@ -12,7 +12,8 @@ from app.db import Database
 from app.models import ADMIN, MEMBER, AccessError, Page, norm_text
 
 TEXT_TYPES = {"p", "h1", "h2", "h3", "bullet", "number", "todo", "quote", "callout", "toggle"}
-BLOCK_TYPES = TEXT_TYPES | {"code", "divider", "page"}
+BLOCK_TYPES = TEXT_TYPES | {"code", "divider", "page", "tasks"}
+TASK_VIEWS = {"board", "table", "calendar", "list"}
 MARKS = ("b", "i", "u", "s", "c")
 MAX_BLOCKS = 3000
 MAX_BLOCK_TEXT = 20000
@@ -101,6 +102,12 @@ def clean_blocks(blocks: object) -> list[dict]:
                 block["page_id"] = int(raw.get("page_id"))
             except (TypeError, ValueError):
                 continue
+        if kind == "tasks":  # доска задач проекта прямо на странице
+            try:
+                block["project_id"] = int(raw.get("project_id"))
+            except (TypeError, ValueError):
+                continue
+            block["view"] = raw.get("view") if raw.get("view") in TASK_VIEWS else "board"
         result.append(block)
     return result
 
@@ -153,11 +160,16 @@ class Pages:
         return parent.id
 
     def _linked_pages_only(self, workspace_id: int, blocks: list[dict]) -> list[dict]:
+        """Ссылки на страницы и доски проектов — только внутри своего пространства."""
         result = []
         for block in blocks:
             if block["type"] == "page":
                 target = self.db.get_page(block["page_id"])
                 if not target or target.workspace_id != workspace_id:
+                    continue
+            if block["type"] == "tasks":
+                project = self.db.get_project(block["project_id"])
+                if not project or project.workspace_id != workspace_id:
                     continue
             result.append(block)
         return result
