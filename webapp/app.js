@@ -32,7 +32,33 @@ async function start() {
   document.addEventListener("keydown", globalKeys);
   window.addEventListener("hashchange", () => { if (S.boot) renderRoute(); });
   window.addEventListener("beforeunload", flushPageOnUnload);
+  document.addEventListener("visibilitychange", refreshAccess);
+  window.addEventListener("focus", refreshAccess);
   await boot();
+}
+
+/** Когда человек возвращается в кабинет, проверяем, не открыли ли ему новые пространства (без перезагрузки). */
+let lastAccessCheck = Date.now();
+async function refreshAccess() {
+  if (!S.boot || !S.wid || document.hidden || Date.now() - lastAccessCheck < 30000) return;
+  lastAccessCheck = Date.now();
+  let fresh;
+  try { fresh = await api("/api/bootstrap", { noAuthRedirect: true }); } catch (_) { return; }
+  const old = S.boot.workspaces;
+  const key = (list) => JSON.stringify(list.map((w) => [w.id, w.name, w.icon, w.role]));
+  S.boot = fresh;
+  if (key(old) === key(fresh.workspaces)) return;
+  const added = fresh.workspaces.filter((w) => !old.find((o) => o.id === w.id));
+  if (!fresh.workspaces.find((w) => w.id === S.wid)) {
+    toast("Доступ к этому пространству закрыт", "error");
+    if (!fresh.workspaces.length) { noWorkspaces(); return; }
+    go(`#/w/${defaultWid()}`);
+    return;
+  }
+  if (added.length) toast(`Вам открыли ${added.length > 1 ? "пространства" : "пространство"} «${added.map((w) => w.name).join("», «")}»`, "ok");
+  const roleBefore = (old.find((w) => w.id === S.wid) || {}).role;
+  if (roleBefore !== fresh.workspaces.find((w) => w.id === S.wid).role) await reloadView();
+  else renderSidebar();
 }
 
 function applyTheme() {
@@ -445,6 +471,10 @@ function renderSidebar() {
         sbItem("search", "Поиск", null, { onclick: openSearch, hint: navigator.platform.includes("Mac") ? "⌘K" : "Ctrl K" }),
         sbItem("home", "Главная", wsHref(), { active: r.name === "home" }),
         sbItem("check", "Мои задачи", wsHref("my"), { active: r.name === "my", badge: urgent || null })),
+      S.boot.workspaces.length > 1 ? sbSection("Пространства", isSuperadmin() ? { title: "Новое пространство", onclick: () => go("#/admin/workspaces") } : null,
+        S.boot.workspaces.map((w) => sbItem(wsBadge(w, "sm"), w.name, `#/w/${w.id}`, {
+          cls: "ws-item" + (w.id === S.wid ? " current" : ""), hint: w.id === S.wid ? "✓" : null,
+        })), "spaces") : null,
       sbSection("Проекты", admin ? { title: "Новый проект", onclick: () => go(wsHref("import")) } : null, projectsTree(), "projects"),
       sbSection("Страницы", canWrite() ? { title: "Новая страница", onclick: () => createPage(null) } : null, pagesTree(), "pages"),
       h("div", { class: "sb-group" },
@@ -595,6 +625,13 @@ async function viewHome() {
   const recent = recentItems();
   const out = [];
   out.push(h("h1", { class: "home-greeting" }, greeting()));
+  if (S.boot.workspaces.length > 1) {
+    out.push(h("div", { class: "home-section" }, sectionTitle("🗂 Ваши пространства", S.boot.workspaces.length),
+      h("div", { class: "pages-grid" }, S.boot.workspaces.map((w) => h("a", {
+        class: "page-tile ws-tile" + (w.id === S.wid ? " current" : ""), href: `#/w/${w.id}`,
+      }, wsBadge(w, "sm"), h("span", { class: "page-tile-title" }, w.name),
+      h("span", { class: "page-tile-sub" }, w.id === S.wid ? "вы здесь" : ROLE_LABEL[w.role] || ""))))));
+  }
   if (recent.length) {
     out.push(h("div", { class: "home-section" }, sectionTitle("🕘 Недавние"),
       h("div", { class: "recent-row" }, recent.map((x) => h("a", { class: "recent-card", href: x.href },
@@ -975,10 +1012,13 @@ function openSearch() {
     const el = results.querySelector(".search-item.active");
     if (el) el.scrollIntoView({ block: "nearest" });
   };
+  const spaceItems = (list) => list.map((w) => ({ icon: wsBadge(w, "sm"), title: w.name, sub: ROLE_LABEL[w.role] || "",
+    go: () => go(`#/w/${w.id}`) }));
   const initial = () => {
     active = 0;
     const recent = recentItems().map((x) => ({ icon: x.icon, title: x.title, sub: x.kind === "page" ? "страница" : "проект", go: () => go(x.href) }));
-    draw([["Недавние", recent], ["Проекты", S.ws.projects.slice(0, 6).map((p) => ({ icon: "📁", title: p.name, go: () => go(projectHref(p.id)) }))]]);
+    draw([["Недавние", recent], ["Проекты", S.ws.projects.slice(0, 6).map((p) => ({ icon: "📁", title: p.name, go: () => go(projectHref(p.id)) }))],
+      ["Другие пространства", spaceItems(S.boot.workspaces.filter((w) => w.id !== S.wid))]]);
   };
   const search = debounce(async () => {
     const q = input.value.trim();
@@ -990,6 +1030,7 @@ function openSearch() {
       active = 0;
       const byId = pagesById();
       draw([
+        ["Пространства", spaceItems(S.boot.workspaces.filter((w) => norm(w.name).includes(norm(q))))],
         ["Страницы", r.pages.map((p) => ({ icon: p.icon || "📄", title: p.title || "Без названия",
           sub: p.parent_id && byId[p.parent_id] ? byId[p.parent_id].title : "", go: () => go(pageHref(p.id)) }))],
         ["Проекты", r.projects.map((p) => ({ icon: "📁", title: p.name, go: () => go(projectHref(p.id)) }))],
