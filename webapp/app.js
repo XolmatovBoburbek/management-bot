@@ -526,10 +526,10 @@ function quickCreate(anchor) {
   const admin = isWsAdmin();
   const here = S.route.name === "project" && S.project && S.project.pid === Number(S.route.params.pid) ? S.project.data.project : null;
   popMenu(anchor, [
-    admin ? { label: here ? `Задача в «${here.name}»` : "Задача", icon: "check", onClick: async () => {
+    { label: here ? `Задача в «${here.name}»` : "Задача", icon: "check", onClick: async () => {
       const project = here || await pickProject(anchor, "В какой проект?");
       if (project) openTaskForm(null, project);
-    } } : null,
+    } },
     { label: "Страница", icon: "page", onClick: () => createPage(null) },
     admin ? { label: "Проект", icon: "folder", onClick: () => go(wsHref("import")) } : null,
   ], { title: "Создать" });
@@ -742,7 +742,7 @@ async function viewMy() {
       todayCount ? h("span", { class: "head-prop static" }, `Срок сегодня ${todayCount}`) : null));
   const body = !data.linked
     ? callout("🔗", "Аккаунт не связан с участником команды — задачи назначаются по имени в колонке «Ответственный». Попросите администратора связать аккаунт в разделе «Доступ».", "gray")
-    : renderTaskDB({ key: "my:" + S.wid, tasks: data.tasks, showProject: true, canCreate: false, noMine: true,
+    : renderTaskDB({ key: "my:" + S.wid, tasks: data.tasks, showProject: true, canCreate: canWrite(), noMine: true,
       defaults: { view: "list" }, readOnly: role() === "viewer" });
   return { title: "Мои задачи", crumbs: [{ icon: "☑️", label: "Мои задачи" }], body: h("div", { class: "page full" }, head, body) };
 }
@@ -995,7 +995,7 @@ function renderTaskEmbed(block, el) {
     try {
       const d = await api(`/api/projects/${block.project_id}`);
       fill(body, renderTaskDB({
-        key: "embed:" + block.id, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: d.role === "admin",
+        key: "embed:" + block.id, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: ["admin", "member"].includes(d.role),
         readOnly: d.role === "viewer", tasksHref: projectHref(d.project.id),
         defaults: { view: block.view || "board", group: (d.stages || []).length ? "stage" : "status" },
       }));

@@ -469,8 +469,24 @@ class Service:
             raise ValueError("Название задачи не может быть пустым")
         return fields
 
+    # Что участник (не админ) может менять в своих задачах
+    SELF_EDIT_FIELDS = {"deadline", "start_date", "description"}
+
+    def _require_self_service(self, actor: Member | None) -> None:
+        """Участник команды (не наблюдатель) может вести свои задачи сам."""
+        if not actor or actor.id <= 0 or actor.is_observer:
+            raise AccessError("Добавлять задачи могут участники команды — попросите администратора связать аккаунт")
+
+    async def _tell_pms(self, actor: Member, text: str, task: Task) -> None:
+        for pm in self._pms():
+            if pm.telegram_id and pm.id != actor.id:
+                await self.notifier.send(pm.telegram_id, text, keyboards.task_actions(task, self.webapp_url))
+
     async def create_task(self, project: Project, data: dict, actor: Member) -> Task:
-        self._require_admin(actor)
+        if not (actor and actor.is_admin):
+            # участник добавляет задачу только себе
+            self._require_self_service(actor)
+            data = {**data, "responsible": actor.name}
         fields = self._clean_fields(data)
         if not fields.get("title"):
             raise ValueError("Укажите название задачи")
@@ -479,14 +495,20 @@ class Service:
         task = self.db.create_task(project.id, status=status, stage_id=stage.id if stage else None, **fields)
         self._event(task.id, "created", "задача создана в боте", actor)
         await self._notify_new_task(task, actor)
+        if not actor.is_admin:
+            await self._tell_pms(actor, f"➕ <b>{texts.e(actor.name)}</b> добавил(а) себе задачу\n\n"
+                                 + texts.task_card(task, project, self.today(), self.team()), task)
         self._queue_write(task)
         return task
 
     async def update_task(self, task: Task, data: dict, actor: Member) -> Task:
-        self._require_admin(actor)
+        if not (actor and actor.is_admin):
+            self.require_task_access(actor, task)
         fields = self._clean_fields(data)
         status = fields.pop("status", None)
         changes = [k for k, v in fields.items() if getattr(task, k) != v]
+        if not actor.is_admin and set(changes) - self.SELF_EDIT_FIELDS:
+            raise AccessError("В своей задаче можно менять срок, дату начала и описание — остальное меняет администратор")
         if not changes and not status:
             return task
         updated = self.db.update_task(task.id, **{k: fields[k] for k in changes})
@@ -510,6 +532,10 @@ class Service:
                         m.telegram_id,
                         f"📅 Срок изменён: <b>{texts.e(updated.title)}</b>\n"
                         f"Новый срок: {texts.fmt_date(updated.deadline, with_weekday=True)}")
+            if not actor.is_admin:
+                await self._tell_pms(actor, f"📅 <b>{texts.e(actor.name)}</b> изменил(а) срок: <b>{texts.e(updated.title)}</b>\n"
+                                     f"Было: {texts.fmt_date(task.deadline, with_weekday=True)} → стало: "
+                                     f"{texts.fmt_date(updated.deadline, with_weekday=True)}", updated)
         self._queue_write(updated)
         return updated
 

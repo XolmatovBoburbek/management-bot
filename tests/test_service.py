@@ -142,8 +142,6 @@ async def test_manual_task_create_and_quick_add(service, workbook, notifier):
     task = await service.create_task(project, data, head)
     assert task.deadline == date(2026, 9, 30) and task.source == "manual" and task.priority == "Критично"
     assert any("Новая задача" in m and "Макет флагов" in m for m in notifier.to(SARVAR_TG))
-    with pytest.raises(AccessError):
-        await service.create_task(project, {"title": "x"}, member(service, "gflwwc"))
     with pytest.raises(ValueError):
         await service.create_task(project, {"title": "x", "deadline": "когда-нибудь"}, head)
 
@@ -394,3 +392,27 @@ def test_existing_database_gets_new_member_columns(tmp_path):
     assert not old.is_observer
     watcher = db.upsert_member(name="Ибрагим", username="ik7777777777", is_observer=True)
     assert db.get_member(watcher.id).is_observer
+
+
+async def test_member_adds_own_tasks_and_moves_own_deadlines(service, workbook, notifier):
+    project = await load(service, workbook)
+    sarvar = member(service, "gflwwc")
+    notifier.messages.clear()
+    # участник добавляет задачу — ответственным всегда становится он сам, руководитель узнаёт
+    task = await service.create_task(project, {"title": "Макет баннера", "responsible": "Сардор", "deadline": "25.10"}, sarvar)
+    assert task.responsible == "Сарвар" and task.deadline == date(2026, 10, 25)
+    assert any("добавил(а) себе задачу" in m and "Макет баннера" in m for m in notifier.to(102))
+    # свой срок меняет сам, руководитель видит было → стало
+    notifier.messages.clear()
+    moved = await service.update_task(task, {"deadline": "27.10", "description": "до печати"}, sarvar)
+    assert moved.deadline == date(2026, 10, 27) and moved.description == "до печати"
+    assert any("изменил(а) срок" in m for m in notifier.to(102))
+    # чужое и лишнее — нельзя
+    with pytest.raises(AccessError):
+        await service.update_task(moved, {"responsible": "Сардор"}, sarvar)
+    press = by_title(service, project)["Команда хостес"]
+    with pytest.raises(AccessError):
+        await service.update_task(press, {"deadline": "30.10"}, sarvar)
+    observer = member(service, "ik7777777777")
+    with pytest.raises(AccessError):
+        await service.create_task(project, {"title": "x"}, observer)

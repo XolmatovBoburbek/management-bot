@@ -309,7 +309,7 @@ def build_router(service: Service) -> Router:
 
     @router.message(Command("add"))
     async def cmd_add(message: Message, command: CommandObject) -> None:
-        member = await require_admin(message)
+        member = await require_writer(message)
         project = await require_project(message) if member else None
         if not member or not project:
             return
@@ -431,8 +431,16 @@ def build_router(service: Service) -> Router:
         else:
             await cmd_help(message)
 
+    async def require_writer(message: Message) -> Member | None:
+        """Админ — любые задачи; участник — только себе; наблюдатель задачи не добавляет."""
+        member = await require_member(message)
+        if member and member.is_observer and not member.is_admin:
+            await message.answer("Наблюдатель не добавляет задачи — попросите администратора.")
+            return None
+        return member
+
     async def ask_new_task(message: Message, state: FSMContext) -> None:
-        member = await require_admin(message)
+        member = await require_writer(message)
         project = await require_project(message) if member else None
         if not member or not project:
             return
@@ -440,9 +448,9 @@ def build_router(service: Service) -> Router:
         await state.update_data(kind="add", asked_at=service.now().timestamp())
         await message.answer(
             f"➕ Новая задача в «{texts.e(project.name)}». Напишите одним сообщением, например:\n"
-            "<code>@username 30.10 Название задачи</code>\n\n"
-            "Ник и дату можно не писать. <code>!!</code> — критично, <code>!</code> — высокий приоритет.\n"
-            "/cancel — отмена")
+            + ("<code>@username 30.10 Название задачи</code>\n\nНик и дату можно не писать. " if member.is_admin
+               else "<code>30.10 Название задачи</code>\n\nЗадача будет на вас, дату можно не писать. ")
+            + "<code>!!</code> — критично, <code>!</code> — высокий приоритет.\n/cancel — отмена")
 
     # ---------- ввод текста (новая задача / проблема / комментарий) ----------
     @router.message(AwaitText.waiting, F.text)

@@ -616,7 +616,7 @@ function dbTools(ctx, cfg, draw, drawBody) {
       ...GROUP_BY.map((g) => ({ label: g.label, icon: g.icon, checked: boardGroup(cfg, ctx) === g.id, onClick: () => { cfg.group = g.id; draw(); } })),
     ], { title: "Группировать по" }) }, icon("group"), h("span", null, group.label)) : null,
     wrap,
-    ctx.canCreate ? h("button", { class: "btn primary sm new-btn", onclick: () => openTaskForm(null, ctx.project) }, "Новая") : null);
+    ctx.canCreate ? h("button", { class: "btn primary sm new-btn", onclick: (e) => newTask(e.currentTarget, ctx.project) }, "Новая") : null);
 }
 
 function filterMenu(anchor, ctx, cfg, draw) {
@@ -690,7 +690,7 @@ function dbBody(tasks, ctx, cfg, draw) {
   if (!ctx.tasks.length) {
     return emptyState("🗂", "Задач пока нет", ctx.canCreate
       ? "Добавьте первую задачу или загрузите Excel с задачами проекта." : "Когда появятся задачи, они будут здесь.",
-    ctx.canCreate ? h("button", { class: "btn primary", onclick: () => openTaskForm(null, ctx.project) }, "Новая задача") : null);
+    ctx.canCreate ? h("button", { class: "btn primary", onclick: (e) => newTask(e.currentTarget, ctx.project) }, "Новая задача") : null);
   }
   if (cfg.view === "board") return boardView(tasks, ctx, cfg);
   if (cfg.view === "calendar") return calendarView(tasks, ctx, cfg, draw);
@@ -748,7 +748,7 @@ function canDropInto(col, cfg, ctx) {
 }
 
 function boardColumn(col, ctx, cfg, board, cols) {
-  const creatable = ctx.canCreate && col.create;
+  const creatable = ctx.canCreate && ctx.project && col.create;
   const label = col.person
     ? h("span", { class: "col-person" }, avatar(col.person.name, col.person.id, "xs"), col.person.name)
     : cfg.group === "status" ? statusPill(col.color, col.label) : tag(col.label, col.color);
@@ -960,7 +960,7 @@ function tableView(tasks, ctx) {
     h("colgroup", null, cols.map((c) => h("col", { style: { width: c.w + "px" } }))),
     h("thead", null, h("tr", null, cols.map((c) => h("th", null, h("div", { class: "th" }, icon(c.icon), h("span", null, c.label)))))),
     h("tbody", null, tasks.map((t) => h("tr", { class: isOpen(t) ? "" : "closed", dataset: { id: t.id } }, cols.map((c) => cell(t, c))))));
-  const newRow = ctx.canCreate ? inlineNewRow(ctx) : null;
+  const newRow = ctx.canCreate && ctx.project ? inlineNewRow(ctx) : null;
   return h("div", { class: "table-wrap", dataset: { keepScroll: "table-" + ctx.key } },
     table, newRow,
     h("div", { class: "table-foot" }, h("span", { class: "calc" }, h("span", { class: "calc-label" }, "Количество"), tasks.length)));
@@ -1048,7 +1048,7 @@ function calendarView(tasks, ctx, cfg, draw) {
     const items = byDate[iso] || [];
     const cell = h("div", { class: "cal-day" + (d.getMonth() !== month.getMonth() ? " other" : "") + (d.getDay() === 0 || d.getDay() === 6 ? " weekend" : ""), dataset: { date: iso } },
       h("div", { class: "cal-day-head" },
-        ctx.canCreate ? h("button", { class: "cal-add", title: "Задача на этот день", onclick: () => openTaskForm({ deadline: iso }, ctx.project) }, icon("plus")) : null,
+        ctx.canCreate && ctx.project ? h("button", { class: "cal-add", title: "Задача на этот день", onclick: () => openTaskForm({ deadline: iso }, ctx.project) }, icon("plus")) : null,
         h("span", { class: "cal-num" + (iso === S.boot.today ? " today" : "") }, d.getDate() === 1 ? `${d.getDate()} ${MONTHS[d.getMonth()]}` : d.getDate())));
     const shown = items.slice(0, 3);
     for (const t of shown) cell.append(calChip(t, admin, grid));
@@ -1174,12 +1174,12 @@ function peekContent(t) {
       : t.responsible || null, admin ? (a) => editAssignee(a, t) : null),
     prop("calendar", "Срок", t.deadline ? h("span", null, fmtDate(t.deadline, true),
       isOpen(t) ? h("span", { class: "prop-note" + (t.days_left < 0 ? " text-red" : "") }, " · " + daysText(t.days_left)) : null) : null,
-    admin ? (a) => editDate(a, t, "deadline") : null),
+    admin || t.can_edit ? (a) => editDate(a, t, "deadline") : null),
     prop("flag", "Приоритет", priorityTag(t.priority), admin ? (a) => editPriority(a, t) : null),
     prop("tag", "Блок", t.block ? tag(t.block, colorFor(t.block)) : null,
       admin ? (a) => editBlock(a, t, S.project && S.project.pid === t.project_id ? S.project.data.tasks : [t]) : null),
     prop("building", "Подрядчик", t.contractor || null, admin ? () => editText(t, "contractor", "Подрядчик") : null),
-    prop("calendar", "Начало", t.start_date ? fmtDate(t.start_date, true) : null, admin ? (a) => editDate(a, t, "start_date") : null),
+    prop("calendar", "Начало", t.start_date ? fmtDate(t.start_date, true) : null, admin || t.can_edit ? (a) => editDate(a, t, "start_date") : null),
     t.eta && isOpen(t) ? prop("clock", "Обещано к", fmtDate(t.eta, true)) : null,
     t.fact_date ? prop("done", "Выполнено", fmtDate(t.fact_date, true)) : null,
     t.proof ? prop("link", "Результат", linkify(t.proof)) : null,
@@ -1225,7 +1225,7 @@ function peekContent(t) {
           } }, icon("tick"), "Проблема решена") : null) : null,
         actions.length ? h("div", { class: "peek-actions" }, actions) : null,
         h("div", { class: "peek-sep" }),
-        descriptionBlock(t, admin),
+        descriptionBlock(t, admin || t.can_edit),
         t.sheet_comment ? callout("📝", h("div", null, h("div", { class: "muted small" }, "Комментарий из таблицы"), t.sheet_comment), "gray") : null,
         t.calls.length ? h("div", { class: "peek-section" }, sectionTitle("Звонки", t.calls.length),
           t.calls.map((c) => h("div", { class: "mini-row" }, icon("phone"), h("span", null, c.contact), h("span", { class: "muted" }, fmtDateTime(c.due_at)),
@@ -1331,6 +1331,12 @@ function taskMenu(anchor, t) {
 }
 
 // ---------- формы ----------
+/** «Новая»: в проекте — сразу форма, в «Моих задачах» — сначала выбрать проект. */
+async function newTask(anchor, project) {
+  const p = project || await pickProject(anchor, "В какой проект?");
+  if (p) openTaskForm(null, p);
+}
+
 function openTaskForm(t, project) {
   const isNew = !t || !t.id;
   const preset = t || {};
@@ -1341,7 +1347,8 @@ function openTaskForm(t, project) {
   const listId = "dl-" + uid();
   const f = {
     title: h("input", { class: "input title-input", value: preset.title || "", placeholder: "Без названия" }),
-    responsible: h("input", { class: "input", value: preset.responsible || "", list: listId + "p", placeholder: "Имя из команды" }),
+    responsible: h("input", { class: "input", value: isWsAdmin() ? preset.responsible || "" : (S.boot.me.member || {}).name || me().name,
+      list: listId + "p", placeholder: "Имя из команды", disabled: !isWsAdmin(), title: isWsAdmin() ? "" : "Участник добавляет задачи себе" }),
     start_date: h("input", { class: "input", type: "date", value: preset.start_date || "" }),
     deadline: h("input", { class: "input", type: "date", value: preset.deadline || "" }),
     priority: h("select", { class: "input" }, h("option", { value: "" }, "—"),
@@ -1486,7 +1493,7 @@ async function viewProject(params) {
   const section = params.section || "tasks";
   if (section === "settings" && !isWsAdmin()) { go(projectHref(pid)); return null; }
   const ctx = {
-    key: "p:" + pid, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: isWsAdmin(), readOnly: d.role === "viewer",
+    key: "p:" + pid, tasks: d.tasks, project: d.project, stages: d.stages || [], canCreate: canWrite(), readOnly: d.role === "viewer",
     defaults: { group: (d.stages || []).length ? "stage" : "status" },
     extraTabs: projectTabsFor(pid), tasksHref: projectHref(pid), noMine: d.role === "viewer" && !S.boot.me.member,
   };

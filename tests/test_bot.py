@@ -163,11 +163,11 @@ async def test_menu_buttons_instead_of_commands(env, service, notifier, workbook
     _, _, session = env
     await service.import_file(workbook.read_bytes(), "erp.xlsx", member(service, "s_maxhan"))
 
-    # после /start внизу — постоянная клавиатура; «Новая задача» — только у администратора
+    # после /start внизу — постоянная клавиатура; «Новая задача» — у всех, кроме наблюдателей
     await feed(env, message=message(106, "gflwwc", "/start"))
     menu = session.sent()[-1].reply_markup
     labels = [b.text for row in menu.keyboard for b in row]
-    assert menu.is_persistent and keyboards.BTN_MY in labels and keyboards.BTN_ADD not in labels
+    assert menu.is_persistent and keyboards.BTN_MY in labels and keyboards.BTN_ADD in labels
     await feed(env, message=message(102, "s_maxhan", "/start"))
     assert keyboards.BTN_ADD in [b.text for row in session.sent()[-1].reply_markup.keyboard for b in row]
 
@@ -209,3 +209,14 @@ async def test_menu_offered_once_to_old_users(env, service, notifier, workbook):
     offers = [(text, kb) for cid, text, kb in notifier.messages if cid == 106 and "кнопки" in text]
     assert len(tasks) >= 2 and len(offers) == 1
     assert isinstance(offers[0][1], ReplyKeyboardMarkup)
+
+
+async def test_member_adds_task_for_self_via_button(env, service, workbook):
+    _, _, session = env
+    await service.import_file(workbook.read_bytes(), "erp.xlsx", member(service, "s_maxhan"))
+    await feed(env, message=message(106, "gflwwc", keyboards.BTN_ADD))
+    assert "Задача будет на вас" in session.sent()[-1].text
+    await feed(env, message=message(106, "gflwwc", "@msnuzz 30.10 Макет пригласительных"))
+    assert "Задача добавлена" in session.sent()[-1].text
+    task = next(t for t in service.db.list_tasks(service.default_project().id) if t.title.endswith("Макет пригласительных"))
+    assert task.responsible == "Сарвар"

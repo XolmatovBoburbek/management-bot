@@ -16,7 +16,7 @@ MENU_BUTTONS = (BTN_MY, BTN_SUMMARY, BTN_CALLS, BTN_ADD, BTN_HELP)
 def main_menu(member: Member) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура в личке: главное — в одно касание большим пальцем."""
     second = [KeyboardButton(text=BTN_CALLS)]
-    if member.is_admin:
+    if not member.is_observer or member.is_admin:
         second.append(KeyboardButton(text=BTN_ADD))
     second.append(KeyboardButton(text=BTN_HELP))
     return ReplyKeyboardMarkup(
