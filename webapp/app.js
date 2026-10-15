@@ -1234,17 +1234,20 @@ function randomPassword() {
 async function viewAdmin(params) {
   if (!isSuperadmin()) return errorView({ status: 403, message: "Раздел доступен главному администратору" });
   const data = await api("/api/admin");
-  const tab = params.tab === "workspaces" ? "workspaces" : "users";
+  const tab = ["workspaces", "telegram"].includes(params.tab) ? params.tab : "users";
+  const fresh = data.contacts.filter((c) => !c.member_id).length;
   const tabs = h("div", { class: "db-bar" }, h("div", { class: "db-tabs" },
     h("a", { class: "db-tab" + (tab === "users" ? " active" : ""), href: "#/admin/users" }, icon("users"), h("span", null, `Пользователи · ${data.users.length}`)),
+    h("a", { class: "db-tab" + (tab === "telegram" ? " active" : ""), href: "#/admin/telegram" }, icon("send"),
+      h("span", null, `Запустили бота · ${data.contacts.length}`), fresh ? h("span", { class: "sb-badge red" }, fresh) : null),
     h("a", { class: "db-tab" + (tab === "workspaces" ? " active" : ""), href: "#/admin/workspaces" }, icon("workspace"), h("span", null, `Пространства · ${data.workspaces.length}`))),
   h("div", { class: "db-tools" }, tab === "users"
     ? h("button", { class: "btn primary sm", onclick: () => userModal(null, data) }, "Добавить пользователя")
-    : h("button", { class: "btn primary sm", onclick: () => workspaceModal(null) }, "Новое пространство")));
-  const body = tab === "users" ? usersTable(data) : workspacesTable(data);
+    : tab === "workspaces" ? h("button", { class: "btn primary sm", onclick: () => workspaceModal(null) }, "Новое пространство") : null));
+  const body = tab === "users" ? usersTable(data) : tab === "telegram" ? contactsTable(data) : workspacesTable(data);
   return {
     title: "Доступ",
-    crumbs: [{ icon: "🔒", label: "Доступ" }, { label: tab === "users" ? "Пользователи" : "Пространства" }],
+    crumbs: [{ icon: "🔒", label: "Доступ" }, { label: { users: "Пользователи", telegram: "Запустили бота", workspaces: "Пространства" }[tab] }],
     body: h("div", { class: "page full" }, h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "🔒"), h("h1", { class: "page-title" }, "Доступ"),
       h("p", { class: "page-lead" }, "Кто может входить в кабинет и что видит в каждом пространстве. Люди видят только те пространства, куда вы их добавили.")),
     tabs, h("div", { class: "section-body" }, body)),
@@ -1274,24 +1277,102 @@ function usersTable(data) {
     }))));
 }
 
-function userModal(u, data) {
+// ---------- кто запускал бота ----------
+function contactName(c) {
+  return (c.full_name || (c.username ? "@" + c.username : `ID ${c.telegram_id}`)) + (c.username && c.full_name ? ` (@${c.username})` : "");
+}
+
+function contactsTable(data) {
+  if (!data.contacts.length) {
+    return emptyState("📭", "Пока никто не писал боту", "Когда человек нажмёт Start в боте или напишет ему, он появится здесь — и его можно будет связать с командой и кабинетом.");
+  }
+  const usersById = Object.fromEntries(data.users.map((u) => [u.id, u]));
+  return h("div", null,
+    h("p", { class: "muted small contacts-lead" }, "Все, кто нажал Start или писал боту в личку. Свяжите человека с участником команды — бот начнёт присылать ему задачи, а аккаунт кабинета будет открываться из Telegram без пароля."),
+    h("div", { class: "table-wrap" }, h("table", { class: "db-table" },
+      h("colgroup", null, [280, 150, 200, 220, 170].map((w) => h("col", { style: { width: w + "px" } }))),
+      h("thead", null, h("tr", null, [["send", "Telegram"], ["clock", "Писал боту"], ["users", "Участник команды"], ["lock", "Кабинет"], ["more", ""]]
+        .map(([ic, label]) => h("th", null, h("div", { class: "th" }, icon(ic), h("span", null, label)))))),
+      h("tbody", null, data.contacts.map((c) => {
+        const user = c.user_id ? usersById[c.user_id] : null;
+        const action = !c.member_id
+          ? h("button", { class: "btn sm primary", onclick: (e) => { e.stopPropagation(); linkContactMenu(e.currentTarget, c, data); } }, "Связать…")
+          : !user ? h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); userModal(null, data, { member_id: c.member_id }); } }, "Дать доступ")
+            : null;
+        return h("tr", { class: c.member_id ? "" : "attention", onclick: () => (user ? userModal(user, data) : null) },
+          h("td", null, h("div", { class: "cell-inner" }, h("span", { class: "person" }, avatar(c.full_name || c.username || "?", c.member_id || c.telegram_id, "sm"),
+            h("span", null, h("b", null, c.full_name || (c.username ? "@" + c.username : "Без имени")),
+              h("span", { class: "muted small block" }, c.username ? "@" + c.username : `ID ${c.telegram_id}`))))),
+          h("td", null, h("div", { class: "cell-inner muted" }, c.last_seen ? relTime(c.last_seen) : "раньше")),
+          h("td", null, h("div", { class: "cell-inner" }, c.member_id ? h("span", { class: "person" }, avatar(c.member_name, c.member_id, "xs"), c.member_name)
+            : tag("не в команде", "yellow", "sm"))),
+          h("td", null, h("div", { class: "cell-inner" }, user ? tag(user.login, "gray", "sm") : h("span", { class: "muted" }, "нет доступа"))),
+          h("td", null, h("div", { class: "cell-inner end" }, action,
+            c.member_id ? h("button", { class: "icon-btn", title: "Ещё", onclick: (e) => { e.stopPropagation(); contactMenu(e.currentTarget, c, data); } }, icon("more")) : null)));
+      })))));
+}
+
+/** «Связать…»: новый участник из этого человека или кто-то из команды, кто ещё не подключил бота. */
+function linkContactMenu(anchor, c, data) {
+  const free = data.members.filter((m) => m.active && !m.connected && m.id !== c.member_id);
+  popMenu(anchor, [
+    { label: `Новый участник: «${c.full_name || c.username || "без имени"}»`, icon: "plus", onClick: async () => {
+      const name = await promptDialog("Новый участник команды", "Имя — как в колонке «Ответственный» таблицы", c.full_name || "", "Добавить");
+      if (name === null) return;
+      await run(() => api(`/api/admin/contacts/${c.telegram_id}/member`, { json: { name } }), "Добавлен в команду");
+      renderRoute({ force: true, keepScroll: true });
+    } },
+    free.length ? { divider: true } : null,
+    ...free.map((m) => ({ label: h("span", { class: "menu-person" }, avatar(m.name, m.id, "xs"), m.name), hint: m.username ? "@" + m.username : "",
+      onClick: async () => {
+        await run(() => api(`/api/admin/contacts/${c.telegram_id}/link`, { json: { member_id: m.id } }), `Связан с участником ${m.name}`);
+        renderRoute({ force: true, keepScroll: true });
+      } })),
+  ], { title: `С кем связать ${contactName(c)}?`, search: free.length > 6 ? "Найти участника…" : null });
+}
+
+function contactMenu(anchor, c, data) {
+  popMenu(anchor, [
+    { label: "Связать с другим участником…", icon: "users", onClick: () => linkContactMenu(anchor, c, data) },
+    { label: "Отвязать Telegram", icon: "close", danger: true, onClick: async () => {
+      if (!(await confirmDialog(`Отвязать Telegram ${contactName(c)} от участника ${c.member_name}? Бот перестанет присылать ему задачи.`, "Отвязать"))) return;
+      await run(() => api(`/api/admin/contacts/${c.telegram_id}/link`, { json: { member_id: null } }), "Отвязано");
+      renderRoute({ force: true, keepScroll: true });
+    } },
+  ]);
+}
+
+function userModal(u, data, preset = {}) {
   const isNew = !u;
   const linkedMembers = new Set(data.users.filter((x) => x.member_id && (!u || x.id !== u.id)).map((x) => x.member_id));
+  const current = u ? u.member_id : preset.member_id;
+  // люди, которые запустили бота, но ещё не в команде, — их можно связать прямо отсюда
+  const freeContacts = data.contacts.filter((c) => !c.member_id);
   const f = {
     name: h("input", { class: "input", value: u ? u.name : "", placeholder: "Имя и фамилия" }),
     login: h("input", { class: "input", value: u ? u.login : "", placeholder: "латиницей, например ivan", autocapitalize: "none", spellcheck: "false" }),
     member_id: h("select", { class: "input" }, h("option", { value: "" }, "— не связан —"),
-      data.members.filter((m) => m.active || (u && u.member_id === m.id)).map((m) => h("option", { value: m.id, selected: u && u.member_id === m.id,
-        disabled: linkedMembers.has(m.id) }, m.name + (m.username ? ` (@${m.username})` : "") + (linkedMembers.has(m.id) ? " — уже связан" : "")))),
+      h("optgroup", { label: "Команда" },
+        data.members.filter((m) => m.active || current === m.id).map((m) => h("option", { value: m.id, selected: current === m.id,
+          disabled: linkedMembers.has(m.id) }, m.name + (m.username ? ` (@${m.username})` : "")
+          + (linkedMembers.has(m.id) ? " — уже связан" : m.connected ? "" : " — ещё не запустил бота")))),
+      freeContacts.length ? h("optgroup", { label: "Запустили бота, но ещё не в команде" },
+        freeContacts.map((c) => h("option", { value: "tg:" + c.telegram_id }, contactName(c)))) : null),
   };
   const superadmin = h("input", { type: "checkbox", checked: u && u.is_superadmin });
   const active = h("input", { type: "checkbox", checked: !u || u.active });
   const password = h("input", { class: "input mono", value: isNew ? randomPassword() : "", placeholder: "не менять" });
-  f.member_id.addEventListener("change", () => {
-    const m = data.members.find((x) => String(x.id) === f.member_id.value);
-    if (m && !f.name.value) f.name.value = m.name;
-    if (m && !f.login.value && m.username) f.login.value = m.username.toLowerCase();
-  });
+  const fillFromPick = () => {
+    const v = f.member_id.value;
+    const c = v.startsWith("tg:") ? freeContacts.find((x) => "tg:" + x.telegram_id === v) : null;
+    const m = c ? null : data.members.find((x) => String(x.id) === v);
+    const name = c ? c.full_name : m && m.name;
+    const uname = c ? c.username : m && m.username;
+    if (name && !f.name.value) f.name.value = name;
+    if (uname && !f.login.value) f.login.value = uname.toLowerCase();
+  };
+  f.member_id.addEventListener("change", fillFromPick);
+  if (isNew && preset.member_id) fillFromPick();
   const roleSelects = data.workspaces.map((w) => {
     const sel = h("select", { class: "input" }, [["", "Нет доступа"], ["viewer", "Наблюдатель"], ["member", "Участник"], ["admin", "Администратор"]]
       .map(([v, label]) => h("option", { value: v, selected: ((u && u.roles[w.id]) || "") === v }, label)));
@@ -1315,16 +1396,23 @@ function userModal(u, data) {
   const close = modal(isNew ? "Новый пользователь" : u.name, h("div", null, body,
     h("div", { class: "btn-row end" }, h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"), save)), { wide: true });
   save.addEventListener("click", async () => {
+    const pick = f.member_id.value;
     const payload = {
-      name: f.name.value, login: f.login.value, member_id: f.member_id.value ? Number(f.member_id.value) : null,
+      name: f.name.value, login: f.login.value, member_id: pick && !pick.startsWith("tg:") ? Number(pick) : null,
       is_superadmin: superadmin.checked, active: active.checked,
       roles: Object.fromEntries(roleSelects.map(([w, sel]) => [w.id, sel.value])),
     };
     if (isNew) payload.password = password.value.trim();
     save.disabled = true;
     try {
-      const r = await run(() => (isNew ? api("/api/admin/users", { json: payload })
-        : api(`/api/admin/users/${u.id}`, { method: "PATCH", json: payload })), isNew ? "Пользователь создан" : "Сохранено");
+      const r = await run(async () => {
+        if (pick.startsWith("tg:")) {
+          // человек запустил бота, но ещё не в команде: сначала добавляем его в команду
+          const made = await api(`/api/admin/contacts/${pick.slice(3)}/member`, { json: { name: f.name.value } });
+          payload.member_id = made.data.id;
+        }
+        return isNew ? api("/api/admin/users", { json: payload }) : api(`/api/admin/users/${u.id}`, { method: "PATCH", json: payload });
+      }, isNew ? "Пользователь создан" : "Сохранено");
       close();
       if (r.data.id === S.boot.me.id) S.boot = await api("/api/bootstrap");
       if (isNew && payload.password) credentialsModal(r.data, payload.password);

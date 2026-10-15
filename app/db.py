@@ -164,6 +164,13 @@ CREATE TABLE IF NOT EXISTS notification_log (
     key TEXT PRIMARY KEY,
     sent_at TEXT
 );
+CREATE TABLE IF NOT EXISTS tg_contacts (
+    telegram_id INTEGER PRIMARY KEY,
+    username TEXT,
+    full_name TEXT DEFAULT '',
+    first_seen TEXT,
+    last_seen TEXT
+);
 CREATE TABLE IF NOT EXISTS workspaces (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -484,6 +491,42 @@ class Database:
     def set_assists(self, member_id: int, assists_id: int | None) -> None:
         self.conn.execute("UPDATE members SET assists_id = ? WHERE id = ?", (assists_id, member_id))
         self.conn.commit()
+
+    def unbind_telegram(self, telegram_id: int) -> None:
+        self.conn.execute("UPDATE members SET telegram_id = NULL WHERE telegram_id = ?", (telegram_id,))
+        self.conn.commit()
+
+    def member_id_by_username(self, username: str) -> int | None:
+        """Участник с таким ником, в том числе неактивный."""
+        uname = (username or "").lstrip("@").strip().lower()
+        row = self.conn.execute("SELECT id FROM members WHERE lower(username) = ?", (uname,)).fetchone() if uname else None
+        return row["id"] if row else None
+
+    def set_member_aliases(self, member_id: int, aliases: str) -> None:
+        self.conn.execute("UPDATE members SET aliases = ? WHERE id = ?", (aliases, member_id))
+        self.conn.commit()
+
+    def set_member_username(self, member_id: int, username: str) -> None:
+        self.conn.execute("UPDATE members SET username = ? WHERE id = ?", (username.lstrip("@").strip().lower(), member_id))
+        self.conn.commit()
+
+    # ---------- кто запускал бота ----------
+    def touch_contact(self, telegram_id: int, username: str | None, full_name: str) -> None:
+        """Запоминает человека, который писал боту в личку (или открыл кабинет из Telegram)."""
+        now = self._now_iso()
+        self.conn.execute(
+            "INSERT INTO tg_contacts(telegram_id, username, full_name, first_seen, last_seen) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, full_name=excluded.full_name, "
+            "last_seen=excluded.last_seen",
+            (telegram_id, (username or "").lstrip("@") or None, full_name or "", now, now))
+        self.conn.commit()
+
+    def get_contact(self, telegram_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM tg_contacts WHERE telegram_id = ?", (telegram_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_contacts(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM tg_contacts ORDER BY last_seen DESC")]
 
     def bind_telegram(self, member_id: int, telegram_id: int) -> None:
         self.conn.execute("UPDATE members SET telegram_id = NULL WHERE telegram_id = ? AND id != ?",

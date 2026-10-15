@@ -226,6 +226,8 @@ async def auth_telegram(request: web.Request) -> web.Response:
         raise AuthError("Не удалось проверить вход из Telegram") from None
     if time.time() - data.auth_date.timestamp() > INIT_DATA_MAX_AGE or not data.user:
         raise AuthError("Сессия Telegram устарела — откройте кабинет из бота заново")
+    full_name = " ".join(p for p in (data.user.first_name, data.user.last_name) if p)
+    service.db.touch_contact(data.user.id, data.user.username, full_name)
     member = service.identify(data.user.id, data.user.username)
     user, token = service.accounts.telegram_login(member)
     return _with_session(request, user, token)
@@ -715,6 +717,7 @@ def _admin_payload(service: Service) -> dict:
         "users": users,
         "workspaces": [w.to_dict() for w in service.db.list_workspaces()],
         "members": [m.to_dict() for m in service.db.list_members(include_inactive=True)],
+        "contacts": service.bot_contacts(),
     }
 
 
@@ -741,6 +744,25 @@ async def admin_user_password(request: web.Request) -> web.Response:
     user, password = service.accounts.reset_password(_user(request), _int(request, "uid"),
                                                      str(body.get("password") or ""))
     return _ok({"user": user.to_dict(), "password": password})
+
+
+async def admin_contact_link(request: web.Request) -> web.Response:
+    """Связать Telegram человека, который запустил бота, с участником команды (или отвязать)."""
+    _require_superadmin(request)
+    service = _service(request)
+    body = await _json(request)
+    member_id = body.get("member_id")
+    member = service.link_contact(_int(request, "tid"), int(member_id) if member_id else None)
+    return _ok(member.to_dict() if member else None)
+
+
+async def admin_contact_member(request: web.Request) -> web.Response:
+    """Добавить в команду человека, который запустил бота."""
+    _require_superadmin(request)
+    service = _service(request)
+    body = await _json(request)
+    member = service.contact_to_member(_int(request, "tid"), str(body.get("name") or ""))
+    return _ok(member.to_dict())
 
 
 async def admin_workspace_create(request: web.Request) -> web.Response:
@@ -848,6 +870,8 @@ def create_app(service: Service) -> web.Application:
     r.add_post("/api/admin/users", admin_user_create)
     r.add_patch("/api/admin/users/{uid:\\d+}", admin_user_update)
     r.add_post("/api/admin/users/{uid:\\d+}/password", admin_user_password)
+    r.add_post("/api/admin/contacts/{tid:\\d+}/link", admin_contact_link)
+    r.add_post("/api/admin/contacts/{tid:\\d+}/member", admin_contact_member)
     r.add_post("/api/admin/workspaces", admin_workspace_create)
     r.add_patch("/api/admin/workspaces/{wid:\\d+}", admin_workspace_update)
     return app

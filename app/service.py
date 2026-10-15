@@ -123,17 +123,22 @@ class Service:
     def seed_team(self, path: Path) -> int:
         """Добавляет из team.yaml тех, кого ещё нет в базе (по нику или имени).
 
-        Уже существующих участников не меняет: их правят в кабинете → «Команда».
+        Уже существующих участников не переписывает (их правят в кабинете → «Команда»), только дописывает
+        новые варианты написания имени из aliases — чтобы задачи из таблицы находили своего человека.
         """
         if not path.exists():
             return 0
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         existing = self.db.list_members(include_inactive=True)
-        known = {m.username.lower() for m in existing if m.username} | {norm_text(m.name) for m in existing}
+        by_username = {m.username.lower(): m for m in existing if m.username}
+        by_name = {norm_text(m.name): m for m in existing}
         created = []
         for item in data.get("members", []):
             username = str(item.get("username", "")).lstrip("@").strip().lower()
-            if username in known or norm_text(str(item["name"])) in known:
+            known = by_username.get(username) if username else None
+            known = known or by_name.get(norm_text(str(item["name"])))
+            if known:
+                self._merge_aliases(known, str(item.get("aliases", "")))
                 continue
             created.append((item, self.db.upsert_member(
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
@@ -146,6 +151,13 @@ class Service:
             if target and target.id != member.id:
                 self.db.set_assists(member.id, target.id)
         return len(created)
+
+    def _merge_aliases(self, member: Member, aliases: str) -> None:
+        current = [a.strip() for a in re.split(r"[,;]", member.aliases or "") if a.strip()]
+        have = {norm_text(a) for a in current} | {norm_text(member.name)}
+        extra = [a.strip() for a in re.split(r"[,;]", aliases) if a.strip() and norm_text(a) not in have]
+        if extra:
+            self.db.set_member_aliases(member.id, ", ".join(current + extra))
 
     def identify(self, telegram_id: int, username: str | None) -> Member | None:
         member = self.db.member_by_telegram(telegram_id)
@@ -179,6 +191,58 @@ class Service:
             active=bool(data.get("active", True)), assists_id=assists_id,
             is_observer=bool(data.get("is_observer")),
         )
+
+    # ---------- кто запускал бота ----------
+    def bot_contacts(self) -> list[dict]:
+        """Все, кто писал боту в личку, — и с кем из команды и каким аккаунтом кабинета они связаны."""
+        by_tg = {m.telegram_id: m for m in self.db.list_members(include_inactive=True) if m.telegram_id}
+        contacts = self.db.list_contacts()
+        seen = {c["telegram_id"] for c in contacts}
+        # подключились раньше, чем бот начал запоминать всех, кто ему пишет
+        contacts += [{"telegram_id": tid, "username": m.username or None, "full_name": m.name, "first_seen": None,
+                      "last_seen": None} for tid, m in by_tg.items() if tid not in seen]
+        out = []
+        for c in contacts:
+            member = by_tg.get(c["telegram_id"])
+            user = self.db.user_by_member(member.id) if member else None
+            out.append({**c, "member_id": member.id if member else None, "member_name": member.name if member else None,
+                        "user_id": user.id if user else None, "user_login": user.login if user else None})
+        return out
+
+    def link_contact(self, telegram_id: int, member_id: int | None) -> Member | None:
+        """Связывает Telegram человека с участником команды (None — отвязать)."""
+        if member_id is None:
+            self.db.unbind_telegram(telegram_id)
+            return None
+        member = self.db.get_member(int(member_id))
+        if not member:
+            raise LookupError("Участник команды не найден")
+        contact = self.db.get_contact(telegram_id)
+        if not contact and member.telegram_id != telegram_id:
+            raise LookupError("Этот человек ещё не писал боту")
+        self.db.bind_telegram(member.id, telegram_id)
+        uname = (contact or {}).get("username")
+        if uname and not member.username and self.db.member_id_by_username(uname) is None:
+            self.db.set_member_username(member.id, uname)
+        return self.db.get_member(member.id)
+
+    def contact_to_member(self, telegram_id: int, name: str = "") -> Member:
+        """Добавляет в команду человека, который запустил бота, и сразу связывает его Telegram."""
+        contact = self.db.get_contact(telegram_id)
+        if not contact:
+            raise LookupError("Этот человек ещё не писал боту")
+        linked = self.db.member_by_telegram(telegram_id)
+        if linked:
+            return linked
+        existing = self.db.member_id_by_username(contact["username"] or "")
+        if existing is not None:  # участник с таким ником уже есть — просто связываем
+            return self.link_contact(telegram_id, existing)  # type: ignore[return-value]
+        name = name.strip() or contact["full_name"] or contact["username"] or ""
+        if not name:
+            raise ValueError("Укажите имя")
+        member = self.db.upsert_member(name=name, username=contact["username"] or "")
+        self.db.bind_telegram(member.id, telegram_id)
+        return self.db.get_member(member.id)  # type: ignore[return-value]
 
     def _require_admin(self, actor: Member | None) -> None:
         if not actor or not actor.is_admin:

@@ -84,6 +84,16 @@ def _is_private(message: Message) -> bool:
 def build_router(service: Service) -> Router:
     router = Router()
 
+    async def remember_contact(handler, event, data):
+        """Запоминаем каждого, кто пишет боту в личку, — администратор увидит его в «Доступ → Запустили бота»."""
+        user, chat = data.get("event_from_user"), data.get("event_chat")
+        if user and not user.is_bot and chat and chat.type == ChatType.PRIVATE:
+            service.db.touch_contact(user.id, user.username, user.full_name)
+        return await handler(event, data)
+
+    router.message.outer_middleware(remember_contact)
+    router.callback_query.outer_middleware(remember_contact)
+
     def actor_for(user: User | None) -> Member | None:
         if user is None:
             return None
@@ -168,7 +178,9 @@ def build_router(service: Service) -> Router:
                         await service.notifier.send(
                             pm.telegram_id,
                             f"👤 В бота зашёл человек не из команды: {texts.e(user.full_name)} {texts.e(uname)}.\n"
-                            "Если это новый участник — добавьте его в кабинете → «Команда».")
+                            "Если это новый участник — добавьте его одним нажатием: кабинет → «Доступ» → "
+                            "«Запустили бота».",
+                            keyboards.app_only(service.webapp_url, "👥 Открыть список", "#/admin/telegram"))
             return
         if command.args == "my":
             await send_my(message.chat.id, member)
