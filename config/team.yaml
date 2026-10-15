@@ -67,6 +67,11 @@ members:
     role: Координатор
     aliases: Abdugafur, Абдугафур
 
+  - name: Олимхон
+    username: khodjaevo
+    role: Маркетинг, PR и билеты
+    aliases: Olimxon, Olimkhon, Olimhon
+
   - name: Ибрагим
     username: ik7777777777
     role: Наблюдатель
