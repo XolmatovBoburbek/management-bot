@@ -1,8 +1,27 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
 
-from app.models import DONE_STATUSES, PROGRESS, Task
+from app.models import DONE_STATUSES, PROGRESS, Member, Task
+
+# Кнопки под полем ввода — чтобы с телефона не набирать команды
+BTN_MY = "📋 Мои задачи"
+BTN_SUMMARY = "📊 Сводка"
+BTN_CALLS = "📞 Обзвон"
+BTN_ADD = "➕ Новая задача"
+BTN_HELP = "❓ Помощь"
+MENU_BUTTONS = (BTN_MY, BTN_SUMMARY, BTN_CALLS, BTN_ADD, BTN_HELP)
+
+
+def main_menu(member: Member) -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура в личке: главное — в одно касание большим пальцем."""
+    second = [KeyboardButton(text=BTN_CALLS)]
+    if member.is_admin:
+        second.append(KeyboardButton(text=BTN_ADD))
+    second.append(KeyboardButton(text=BTN_HELP))
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_SUMMARY)], second],
+        resize_keyboard=True, is_persistent=True, input_field_placeholder="Выберите действие внизу")
 
 
 def _rows(*rows: list[InlineKeyboardButton] | None) -> InlineKeyboardMarkup:

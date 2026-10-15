@@ -25,8 +25,11 @@ async function start() {
     tg.expand();
     if (tg.BackButton) tg.BackButton.onClick(goBack);
     tg.onEvent("themeChanged", applyTheme);
+    // свайп вниз по списку или доске не должен сворачивать кабинет
+    try { if (tg.isVersionAtLeast("7.7")) tg.disableVerticalSwipes(); } catch (_) { /* старый клиент */ }
     document.documentElement.classList.add("tg");
   }
+  trackKeyboard();
   window.onAuthLost = () => showLogin("Сессия закончилась — войдите снова.");
   window.onMustChangePassword = () => showChangePassword();
   document.addEventListener("keydown", globalKeys);
@@ -289,7 +292,10 @@ async function renderRoute(opts = {}) {
   const leavingPage = S.pageState && !(r.name === "page" && r.params.id === S.pageState.id && opts.keepPage);
   if (leavingPage) await leavePage();
   ensureLayout();
-  if (!opts.keepScroll && window.innerWidth < 900) setSidebar(false);
+  if (!opts.keepScroll && window.innerWidth < 900) {
+    setSidebar(false);
+    if (S.peek && !opts.force) closePeek();
+  }
   try {
     if (!S.ws) await loadWorkspace();
   } catch (err) {
@@ -340,7 +346,8 @@ function ensureLayout() {
     h("div", { class: "sidebar-scrim", onclick: () => setSidebar(false) }),
     h("main", { class: "main" },
       h("header", { class: "topbar", id: "topbar" }),
-      h("div", { class: "scroller", id: "scroller" }))));
+      h("div", { class: "scroller", id: "scroller" }),
+      h("nav", { class: "tabbar", id: "tabbar", "aria-label": "Разделы" }))));
 }
 
 function mount(view, opts) {
@@ -393,6 +400,7 @@ function setSidebar(open) {
   if (window.innerWidth < 900) {
     S.sidebarOpen = open;
     layout.classList.toggle("sb-open", open);
+    renderTabbar();
   } else {
     layout.classList.toggle("sb-collapsed", !open);
     store("sb:collapsed", !open);
@@ -467,7 +475,7 @@ function renderSidebar() {
         wsBadge(ws), h("span", { class: "sb-ws-name" }, ws.name), icon("down", "sb-caret")),
       h("button", { class: "icon-btn sb-hide", onclick: () => setSidebar(false), title: "Скрыть панель (Ctrl+\\)" }, icon("dleft"))),
     h("div", { class: "sb-scroll" },
-      h("div", { class: "sb-group" },
+      h("div", { class: "sb-group sb-nav" },
         sbItem("search", "Поиск", null, { onclick: openSearch, hint: navigator.platform.includes("Mac") ? "⌘K" : "Ctrl K" }),
         sbItem("home", "Главная", wsHref(), { active: r.name === "home" }),
         sbItem("check", "Мои задачи", wsHref("my"), { active: r.name === "my", badge: urgent || null })),
@@ -491,6 +499,50 @@ function renderSidebar() {
         h("span", { class: "sb-profile-text" }, h("span", { class: "sb-profile-name" }, me().name),
           h("span", { class: "sb-profile-sub" }, ROLE_LABEL[role()] || "")),
         icon("more"))));
+  renderTabbar();
+}
+
+// ---------- нижняя панель (телефон) ----------
+function renderTabbar() {
+  const bar = document.getElementById("tabbar");
+  if (!bar || !S.ws) return;
+  const r = S.route;
+  const urgent = S.ws.projects.reduce((n, p) => n + (p.my_urgent || 0), 0);
+  const tab = (iconName, label, opts) => h(opts.href ? "a" : "button", {
+    class: "tab" + (opts.active ? " active" : ""), href: opts.href, onclick: opts.onclick, "aria-label": label,
+  }, h("span", { class: "tab-icon" }, icon(iconName), opts.badge ? h("span", { class: "tab-badge" }, opts.badge > 99 ? "99+" : opts.badge) : null),
+  h("span", { class: "tab-label" }, label));
+  fill(bar,
+    tab("home", "Главная", { href: wsHref(), active: r.name === "home" }),
+    tab("check", "Мои задачи", { href: wsHref("my"), active: r.name === "my", badge: urgent || null }),
+    canWrite() ? h("button", { class: "tab tab-new", onclick: (e) => quickCreate(e.currentTarget), "aria-label": "Создать" },
+      h("span", { class: "tab-plus" }, icon("plus"))) : null,
+    tab("search", "Поиск", { onclick: openSearch }),
+    tab("menu", "Меню", { onclick: () => setSidebar(true), active: S.sidebarOpen }));
+}
+
+/** Кнопка «+» на телефоне: новая задача, страница или проект — что доступно по роли. */
+function quickCreate(anchor) {
+  const admin = isWsAdmin();
+  const here = S.route.name === "project" && S.project && S.project.pid === Number(S.route.params.pid) ? S.project.data.project : null;
+  popMenu(anchor, [
+    admin ? { label: here ? `Задача в «${here.name}»` : "Задача", icon: "check", onClick: async () => {
+      const project = here || await pickProject(anchor, "В какой проект?");
+      if (project) openTaskForm(null, project);
+    } } : null,
+    { label: "Страница", icon: "page", onClick: () => createPage(null) },
+    admin ? { label: "Проект", icon: "folder", onClick: () => go(wsHref("import")) } : null,
+  ], { title: "Создать" });
+}
+
+/** Экранная клавиатура на телефоне: прячем нижние панели, чтобы они не висели над ней. */
+function trackKeyboard() {
+  const typing = (el) => el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))
+    && !["checkbox", "radio", "file", "button"].includes(el.type);
+  document.addEventListener("focusin", (e) => { if (isPhone() && typing(e.target)) document.body.classList.add("kb-open"); });
+  document.addEventListener("focusout", () => setTimeout(() => {
+    if (!typing(document.activeElement)) document.body.classList.remove("kb-open");
+  }, 80));
 }
 
 function treeToggle(open, onToggle, hasChildren) {
@@ -912,13 +964,13 @@ async function viewPage(params) {
 }
 
 // ---------- доска задач внутри страницы ----------
-function pickProject(anchor) {
+function pickProject(anchor, title = "Доска какого проекта?") {
   return new Promise((resolve) => {
     const projects = S.ws.projects;
     if (!projects.length) { toast("В пространстве пока нет проектов", "error"); resolve(null); return; }
     let picked = false;
     popMenu(anchor, projects.map((p) => ({ label: p.name, icon: "📁", onClick: () => { picked = true; resolve(p); } })), {
-      title: "Доска какого проекта?", search: projects.length > 6 ? "Найти проект…" : null,
+      title, search: projects.length > 6 ? "Найти проект…" : null,
       onClose: () => setTimeout(() => { if (!picked) resolve(null); }, 0),
     });
   });

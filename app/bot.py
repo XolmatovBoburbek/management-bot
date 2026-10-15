@@ -22,11 +22,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     MenuButtonWebApp,
     Message,
+    ReplyKeyboardMarkup,
     User,
     WebAppInfo,
 )
 
 from app import keyboards, logic, texts
+from app.dates import fmt_short
 from app.excel_io import WorkbookError
 from app.gsheets import GSheetError
 from app.models import CANCELLED, DONE, PROGRESS, Member, Project
@@ -49,7 +51,8 @@ class TelegramNotifier:
         cut = text.rfind("\n", 0, TG_LIMIT)
         return text[: cut if cut > 0 else TG_LIMIT] + "\n…"
 
-    async def send(self, chat_id: int, text: str, keyboard: InlineKeyboardMarkup | None = None) -> bool:
+    async def send(self, chat_id: int, text: str,
+                   keyboard: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None) -> bool:
         for _ in range(2):
             try:
                 await self.bot.send_message(chat_id, self._fit(text), reply_markup=keyboard)
@@ -122,13 +125,29 @@ def build_router(service: Service) -> Router:
             if focus.open_total == 0 and len(projects) > 1:
                 continue
             text = texts.personal_digest(member, project, focus, today, weekly=True, greeting=False)
-            top = (focus.overdue + focus.today + focus.soon + focus.in_progress)[:6]
-            rows = [[InlineKeyboardButton(text=f"{'🆘 ' if t.blocked else ''}{t.title[:48]}",
-                                          callback_data=f"t:card:{t.id}")] for t in top]
+            marked = ([(t, "🔴") for t in focus.overdue] + [(t, "🟠") for t in focus.today]
+                      + [(t, "🟡") for t in focus.soon] + [(t, "🔵") for t in focus.in_progress])[:6]
+            rows = [[InlineKeyboardButton(text=task_button(t, mark), callback_data=f"t:card:{t.id}")] for t, mark in marked]
             app = keyboards.app_button(service.webapp_url, "📋 Все мои задачи", "?tab=my")
             if app:
                 rows.append([app])
             await service.notifier.send(chat_id, text, InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+
+    def task_button(task, mark: str) -> str:
+        """Текст кнопки задачи — на телефоне сразу видно, что горит и к какому числу."""
+        due = f"{fmt_short(task.deadline)} · " if task.deadline else ""
+        return f"{'🆘' if task.blocked else mark} {due}{task.title}"[:60]
+
+    def menu_shown(user_id: int) -> bool:
+        """Помечает, что клавиатура с кнопками у человека уже есть. True — если показываем впервые."""
+        return service.db.mark_sent(f"menu-kb:{user_id}")
+
+    async def offer_menu(chat_id: int, member: Member | None) -> None:
+        """Тем, кто подключился до появления кнопок, один раз присылаем их — с первым же действием в боте."""
+        if member and menu_shown(chat_id):
+            await service.notifier.send(
+                chat_id, "⌨️ Внизу экрана теперь кнопки: мои задачи, сводка, обзвон — без набора команд.",
+                keyboards.main_menu(member))
 
     # ---------- команды ----------
     @router.message(CommandStart())
@@ -167,7 +186,7 @@ def build_router(service: Service) -> Router:
                 "Каждое утро я присылаю сводку по проекту: просрочки, блокеры, что закрыто за сутки. "
                 "/summary — сводка сейчас, /calls — обзвон на сегодня.",
                 "",
-                "Кнопка <b>«Открыть»</b> внизу слева — все задачи, обзор команды и обзвон (только просмотр).",
+                "Кнопка <b>«Открыть»</b> слева от поля ввода — все задачи, обзор команды и обзвон (только просмотр).",
             ]
         else:
             lines = [
@@ -178,13 +197,14 @@ def build_router(service: Service) -> Router:
                 "Каждое утро я пишу ваши задачи на день и спрашиваю «выполнено?» по горящим срокам, "
                 "вечером — «успеваете?» по завтрашним.",
                 "",
-                "Кнопка <b>«Открыть»</b> внизу слева — ваш личный кабинет с задачами и сроками.",
+                "Кнопка <b>«Открыть»</b> слева от поля ввода — ваш кабинет с задачами, досками и сроками.",
             ]
         if member.is_admin:
             lines += ["", "Вы администратор: пришлите сюда Excel-файл с задачами или ссылку на Google Таблицу "
                           "командой /sheet. /help — все команды."]
-        await message.answer("\n".join(lines), reply_markup=keyboards.app_only(
-            service.webapp_url, query="?tab=home" if observer_view else "?tab=my"))
+        lines += ["", "👇 Главное — кнопками внизу экрана."]
+        menu_shown(message.chat.id)
+        await message.answer("\n".join(lines), reply_markup=keyboards.main_menu(member))
         if service.webapp_url.startswith("https://"):
             try:
                 await message.bot.set_chat_menu_button(
@@ -193,14 +213,22 @@ def build_router(service: Service) -> Router:
             except TelegramBadRequest as exc:
                 log.warning("Cannot set menu button: %s", exc)
 
+    def private_menu(message: Message) -> ReplyKeyboardMarkup | None:
+        """Клавиатура с кнопками — только в личке и только для участников команды."""
+        member = actor_for(message.from_user) if _is_private(message) else None
+        if not member:
+            return None
+        menu_shown(message.chat.id)
+        return keyboards.main_menu(member)
+
     @router.message(Command("help"))
     async def cmd_help(message: Message) -> None:
-        await message.answer(texts.HELP)
+        await message.answer(texts.HELP, reply_markup=private_menu(message))
 
     @router.message(Command("cancel"))
     async def cmd_cancel(message: Message, state: FSMContext) -> None:
         await state.clear()
-        await message.answer("Ок, отменил.")
+        await message.answer("Ок, отменил.", reply_markup=private_menu(message))
 
     @router.message(Command("my"))
     async def cmd_my(message: Message) -> None:
@@ -215,6 +243,7 @@ def build_router(service: Service) -> Router:
                 await message.reply(f"Сначала нажмите Start в личке: https://t.me/{service.bot_username}")
             return
         await send_my(message.chat.id, member)
+        await offer_menu(message.chat.id, member)
 
     @router.message(Command("summary"))
     async def cmd_summary(message: Message) -> None:
@@ -233,6 +262,8 @@ def build_router(service: Service) -> Router:
             await message.answer(text, reply_markup=keyboards.pm_actions(service.webapp_url))
         else:
             await message.answer(texts.group_digest(project, tasks, team, today, logic.workload(tasks, team, today)))
+        if _is_private(message):
+            await offer_menu(message.chat.id, member)
 
     @router.message(Command("calls"))
     async def cmd_calls(message: Message) -> None:
@@ -261,6 +292,8 @@ def build_router(service: Service) -> Router:
                 lines.append(f"   звонит: {texts.e(', '.join(item['owners']))}")
         await message.answer("\n".join(lines), reply_markup=keyboards.app_only(
             service.webapp_url, "📞 Отметить в кабинете", "?tab=calls") if _is_private(message) else None)
+        if _is_private(message):
+            await offer_menu(message.chat.id, member)
 
     @router.message(Command("add"))
     async def cmd_add(message: Message, command: CommandObject) -> None:
@@ -371,7 +404,35 @@ def build_router(service: Service) -> Router:
         await wait.edit_text(texts.import_report(result, parsed, audit),
                              reply_markup=keyboards.app_only(service.webapp_url, "📊 Открыть панель", "?tab=home"))
 
-    # ---------- ввод текста (проблема / комментарий) ----------
+    # ---------- кнопки внизу экрана (личка) ----------
+    @router.message(F.text.in_(keyboards.MENU_BUTTONS), F.chat.type == ChatType.PRIVATE)
+    async def on_menu_button(message: Message, state: FSMContext) -> None:
+        await state.clear()  # нажали кнопку — значит, на прошлый вопрос бота уже не отвечают
+        if message.text == keyboards.BTN_MY:
+            await cmd_my(message)
+        elif message.text == keyboards.BTN_SUMMARY:
+            await cmd_summary(message)
+        elif message.text == keyboards.BTN_CALLS:
+            await cmd_calls(message)
+        elif message.text == keyboards.BTN_ADD:
+            await ask_new_task(message, state)
+        else:
+            await cmd_help(message)
+
+    async def ask_new_task(message: Message, state: FSMContext) -> None:
+        member = await require_admin(message)
+        project = await require_project(message) if member else None
+        if not member or not project:
+            return
+        await state.set_state(AwaitText.waiting)
+        await state.update_data(kind="add", asked_at=service.now().timestamp())
+        await message.answer(
+            f"➕ Новая задача в «{texts.e(project.name)}». Напишите одним сообщением, например:\n"
+            "<code>@username 30.10 Название задачи</code>\n\n"
+            "Ник и дату можно не писать. <code>!!</code> — критично, <code>!</code> — высокий приоритет.\n"
+            "/cancel — отмена")
+
+    # ---------- ввод текста (новая задача / проблема / комментарий) ----------
     @router.message(AwaitText.waiting, F.text)
     async def on_text_input(message: Message, state: FSMContext) -> None:
         if message.text.startswith("/"):
@@ -380,18 +441,27 @@ def build_router(service: Service) -> Router:
         data = await state.get_data()
         await state.clear()
         if service.now().timestamp() - data.get("asked_at", 0) > TEXT_INPUT_TTL:
-            return  # спрашивали давно — это уже не ответ на вопрос о задаче
+            return  # спрашивали давно — это уже не ответ на вопрос бота
         member = actor_for(message.from_user)
+        menu = private_menu(message)
         try:
+            if data["kind"] == "add":
+                project = service.default_project()
+                if not project:
+                    raise LookupError("Проектов пока нет")
+                task = await service.create_task(project, service.parse_quick_add(message.text), member)
+                await message.answer("➕ Задача добавлена\n\n" + texts.task_card(task, project, service.today(), service.team()),
+                                     reply_markup=keyboards.task_actions(task, service.webapp_url))
+                return
             task = service.get_task(int(data["task_id"]))
             if data["kind"] == "problem":
                 await service.report_problem(task, message.text, member)
-                await message.answer("🆘 Передал руководителю проекта. Вам напишут.")
+                await message.answer("🆘 Передал руководителю проекта. Вам напишут.", reply_markup=menu)
             else:
                 await service.add_comment(task, message.text, member)
-                await message.answer("💬 Комментарий сохранён.")
+                await message.answer("💬 Комментарий сохранён.", reply_markup=menu)
         except (AccessError, LookupError, ValueError) as exc:
-            await message.answer(f"⚠️ {texts.e(exc)}")
+            await message.answer(f"⚠️ {texts.e(exc)}", reply_markup=menu)
 
     # ---------- кнопки ----------
     async def finish(callback: CallbackQuery, suffix: str, markup: InlineKeyboardMarkup | None = None) -> None:
@@ -452,6 +522,8 @@ def build_router(service: Service) -> Router:
                 await callback.answer()
                 return
             await callback.answer()
+            if in_private and action not in ("prob", "cmt"):
+                await offer_menu(callback.message.chat.id, member)
         except AccessError as exc:
             await callback.answer(str(exc), show_alert=True)
 
@@ -475,6 +547,16 @@ def build_router(service: Service) -> Router:
             await service.snooze_call(call, until)
             await finish(callback, "📅 Напомню завтра в 10:00")
         await callback.answer()
+        if isinstance(callback.message, Message) and callback.message.chat.type == ChatType.PRIVATE:
+            await offer_menu(callback.message.chat.id, member)
+
+    @router.message(F.text, F.chat.type == ChatType.PRIVATE)
+    async def on_other_text(message: Message) -> None:
+        member = await require_member(message)
+        if member:
+            await message.answer("Выберите действие кнопками внизу 👇\n"
+                                 "Задачи, доски и сроки — в кабинете: кнопка «Открыть» слева от поля ввода.",
+                                 reply_markup=private_menu(message))
 
     @router.my_chat_member()
     async def on_added_to_group(event) -> None:

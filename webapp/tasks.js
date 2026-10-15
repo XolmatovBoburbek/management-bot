@@ -578,6 +578,15 @@ function dbBar(ctx, cfg, section, draw, drawBody) {
     }, icon(v.icon), h("span", null, v.label))),
     (ctx.extraTabs || []).map((t) => h("a", { class: "db-tab" + (section === t.id ? " active" : ""), href: t.href },
       icon(t.icon), h("span", null, t.label))));
+  if (isPhone()) {
+    // на узком экране вкладки прокручиваются — показываем выбранную
+    requestAnimationFrame(() => {
+      const active = tabs.querySelector(".db-tab.active");
+      if (!active) return;
+      const over = active.getBoundingClientRect().right - tabs.getBoundingClientRect().right;
+      if (over > 0) tabs.scrollLeft += over + 24;
+    });
+  }
   return h("div", { class: "db-bar" }, tabs, section === "tasks" ? dbTools(ctx, cfg, draw, drawBody) : null);
 }
 
@@ -1176,16 +1185,19 @@ function peekContent(t) {
     t.proof ? prop("link", "Результат", linkify(t.proof)) : null,
     prop("folder", "Проект", h("a", { href: projectHref(t.project_id), onclick: () => { if (window.innerWidth < 900) closePeek(); } }, t.project_name)));
 
-  const actions = [];
+  // на телефоне смена статуса — в закреплённой панели снизу, под большим пальцем
+  const phone = isPhone();
+  const statusActions = [];
   if (t.can_edit) {
     if (isOpen(t)) {
-      if (t.raw_status !== "progress") actions.push(h("button", { class: "btn sm", onclick: () => setStatus(t, "progress") }, icon("play"), "В работу"));
-      actions.push(h("button", { class: "btn sm primary", onclick: () => setStatus(t, "done") }, icon("tick"), "Выполнено"));
-      if (!t.blocked) actions.push(h("button", { class: "btn sm", onclick: () => problemDialog(t) }, icon("help"), "Нужна помощь"));
+      if (t.raw_status !== "progress") statusActions.push(h("button", { class: "btn sm", onclick: () => setStatus(t, "progress") }, icon("play"), "В работу"));
+      statusActions.push(h("button", { class: "btn sm primary", onclick: () => setStatus(t, "done") }, icon("tick"), "Выполнено"));
+      if (!t.blocked) statusActions.push(h("button", { class: "btn sm", onclick: () => problemDialog(t) }, icon("help"), phone ? "Помощь" : "Нужна помощь"));
     } else {
-      actions.push(h("button", { class: "btn sm", onclick: () => setStatus(t, "progress") }, icon("undo"), "Вернуть в работу"));
+      statusActions.push(h("button", { class: "btn sm", onclick: () => setStatus(t, "progress") }, icon("undo"), "Вернуть в работу"));
     }
   }
+  const actions = phone ? [] : statusActions;
   if (canWrite() && (t.can_edit || admin)) {
     actions.push(h("button", { class: "btn sm", onclick: () => openCallForm({ task_id: t.id, contact: t.contractor || "", project_id: t.project_id }) },
       icon("phone"), "Звонок"));
@@ -1197,7 +1209,7 @@ function peekContent(t) {
 
   return h("div", { class: "peek-inner" },
     h("div", { class: "peek-top" },
-      h("button", { class: "icon-btn", onclick: closePeek, title: "Закрыть (Esc)", "aria-label": "Закрыть" }, icon("dright")),
+      h("button", { class: "icon-btn", onclick: closePeek, title: "Закрыть (Esc)", "aria-label": "Закрыть" }, icon(phone ? "close" : "dright")),
       h("a", { class: "peek-crumb", href: projectHref(t.project_id) }, icon("folder"), h("span", null, t.project_name)),
       h("span", { class: "grow" }),
       h("button", { class: "icon-btn", title: "Скопировать ссылку", onclick: () => copyText(taskLink(t)) }, icon("link")),
@@ -1226,7 +1238,8 @@ function peekContent(t) {
           h("div", { class: "history" }, history.map((e) => h("div", { class: "history-item" },
             h("span", { class: "history-ico" }, EVENT_ICONS[e.kind] || "•"),
             h("div", null, h("span", null, e.member_name ? h("b", null, e.member_name + " ") : null, e.text),
-              h("div", { class: "muted small" }, relTime(e.created_at)))))), false, "peek-history") : null)));
+              h("div", { class: "muted small" }, relTime(e.created_at)))))), false, "peek-history") : null)),
+    phone && statusActions.length ? h("div", { class: "peek-foot" }, statusActions) : null);
 }
 
 function linkify(text) {

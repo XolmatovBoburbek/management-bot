@@ -190,6 +190,9 @@ function toast(message, kind) {
   toast._t = setTimeout(() => { el.hidden = true; }, 3200);
 }
 
+/** Узкий экран (телефон): нижняя панель вместо боковой, меню выезжают снизу. */
+function isPhone() { return window.matchMedia("(max-width: 899px)").matches; }
+
 function haptic(kind) {
   try { inTelegram && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch (_) { /* старый клиент */ }
 }
@@ -388,7 +391,7 @@ function popMenu(anchor, items, opts = {}) {
       const q = input.value.trim().toLowerCase();
       list.querySelectorAll(".menu-item").forEach((el) => { el.hidden = q && !el.textContent.toLowerCase().includes(q); });
     });
-    setTimeout(() => input.focus(), 20);
+    if (!isPhone()) setTimeout(() => input.focus(), 20);
   }
   for (const item of items) {
     if (!item) continue;
@@ -413,6 +416,12 @@ function popMenu(anchor, items, opts = {}) {
 }
 
 function placeNear(el, anchor) {
+  if (isPhone()) {
+    // на телефоне меню и календарь — «шторка» снизу, до неё легко дотянуться большим пальцем
+    el.classList.add("as-sheet");
+    if (el.parentElement) el.parentElement.classList.add("sheet-layer");
+    return;
+  }
   const r = anchor.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;

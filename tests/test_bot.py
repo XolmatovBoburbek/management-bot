@@ -13,8 +13,9 @@ from aiogram.methods import (
     SendMessage,
     SetChatMenuButton,
 )
-from aiogram.types import CallbackQuery, Chat, Document, File, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Document, File, Message, ReplyKeyboardMarkup, Update, User
 
+from app import keyboards
 from app.bot import build_router
 from app.models import DONE
 from tests.conftest import TOKEN, member
@@ -156,3 +157,55 @@ async def test_export_and_calls_commands(env, service, workbook):
     assert "Обзвон" in session.sent()[-1].text or "некого" in session.sent()[-1].text
     await feed(env, message=message(102, "s_maxhan", "/summary"))
     assert "Сводка" in session.sent()[-1].text
+
+
+async def test_menu_buttons_instead_of_commands(env, service, notifier, workbook):
+    _, _, session = env
+    await service.import_file(workbook.read_bytes(), "erp.xlsx", member(service, "s_maxhan"))
+
+    # после /start внизу — постоянная клавиатура; «Новая задача» — только у администратора
+    await feed(env, message=message(106, "gflwwc", "/start"))
+    menu = session.sent()[-1].reply_markup
+    labels = [b.text for row in menu.keyboard for b in row]
+    assert menu.is_persistent and keyboards.BTN_MY in labels and keyboards.BTN_ADD not in labels
+    await feed(env, message=message(102, "s_maxhan", "/start"))
+    assert keyboards.BTN_ADD in [b.text for row in session.sent()[-1].reply_markup.keyboard for b in row]
+
+    # «Мои задачи» кнопкой: на кнопках задач видно срочность и срок
+    notifier.messages.clear()
+    await feed(env, message=message(106, "gflwwc", keyboards.BTN_MY))
+    _, text, markup = notifier.messages[-1]
+    assert "Ваши задачи" in text
+    first = markup.inline_keyboard[0][0].text
+    assert first[0] in "🔴🟠🟡🔵🆘" and "·" in first
+
+    # «Новая задача» кнопкой: бот спрашивает, следующее сообщение — задача
+    await feed(env, message=message(102, "s_maxhan", keyboards.BTN_ADD))
+    assert "Напишите одним сообщением" in session.sent()[-1].text
+    await feed(env, message=message(102, "s_maxhan", "@gflwwc 30.10 Макет баннера"))
+    reply = session.sent()[-1]
+    assert "Задача добавлена" in reply.text and "Макет баннера" in reply.text
+    project = service.default_project()
+    assert any(t.title == "Макет баннера" for t in service.db.list_tasks(project.id))
+
+    # другие кнопки и просто текст
+    await feed(env, message=message(106, "gflwwc", keyboards.BTN_SUMMARY))
+    assert "Тестовое открытие" in session.sent()[-1].text
+    await feed(env, message=message(106, "gflwwc", "привет"))
+    assert "кнопками внизу" in session.sent()[-1].text and session.sent()[-1].reply_markup.keyboard
+
+
+async def test_menu_offered_once_to_old_users(env, service, notifier, workbook):
+    _, _, session = env
+    await service.import_file(workbook.read_bytes(), "erp.xlsx", member(service, "s_maxhan"))
+    project = service.default_project()
+    tasks = [t for t in service.db.list_tasks(project.id) if "Сарвар" in t.responsible]
+    notifier.messages.clear()
+    # подключился до появления кнопок: получит их один раз — с первым нажатием под задачей
+    for i, task in enumerate(tasks[:2]):
+        cb = CallbackQuery(id=f"m{i}", from_user=user(106, "gflwwc"), chat_instance="c", data=f"t:start:{task.id}",
+                           message=message(106, "gflwwc", "Задача"))
+        await feed(env, callback_query=cb)
+    offers = [(text, kb) for cid, text, kb in notifier.messages if cid == 106 and "кнопки" in text]
+    assert len(tasks) >= 2 and len(offers) == 1
+    assert isinstance(offers[0][1], ReplyKeyboardMarkup)

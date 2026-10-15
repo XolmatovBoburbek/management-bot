@@ -98,7 +98,7 @@
   --sb-w: 248px;
   --top-h: 45px;
   --pad: 96px;
-  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-b: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
 }
 
 :root[data-theme="dark"] {
@@ -354,6 +354,7 @@ select.input { appearance: none; padding-right: 28px; cursor: pointer;
 .main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 .scroller { flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; position: relative; }
 .sidebar-scrim { display: none; }
+.tabbar { display: none; }
 
 .topbar {
   height: var(--top-h); flex-shrink: 0; display: flex; align-items: center; gap: 6px;
@@ -1101,8 +1102,9 @@ button.stat:hover { background: var(--hover); }
 }
 
 @media (max-width: 899px) {
-  :root { --pad: 20px; }
-  .tb-menu { display: inline-flex; }
+  :root { --pad: 16px; }
+  .layout .tb-menu, .layout.sb-collapsed .tb-menu { display: none; }
+  .topbar { padding: 0 8px 0 10px; }
   .sidebar {
     position: fixed; left: 0; top: 0; bottom: 0; width: min(300px, 86vw); transform: translateX(-102%); margin-left: 0 !important;
     box-shadow: none; z-index: 120; visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s;
@@ -1113,19 +1115,23 @@ button.stat:hover { background: var(--hover); }
   .sb-item, .sb-profile { min-height: 36px; }
   .sb-section-add, .board-col-head .icon-btn { opacity: 1; }
   .page-head, .page-head.doc { padding-top: 28px; }
-  .page.full .page-head { padding-top: 20px; }
+  .page.full .page-head { display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; padding-top: 12px; }
+  .page.full .page-head > :not(.page-icon):not(.page-title) { flex: 1 1 100%; }
   .page-title { font-size: 30px; }
-  .page.full .page-title { font-size: 26px; }
+  .page.full .page-title { font-size: 24px; flex: 1 1 0; min-width: 0; }
   .page-icon { font-size: 48px; }
-  .page.full .page-icon { font-size: 38px; }
+  .page.full .page-icon { font-size: 28px; margin: 0; }
   .page-emoji { font-size: 56px; height: 64px; width: 68px; }
   .page-head-tools { opacity: 1; }
-  .home-greeting { font-size: 24px; padding: 32px 0 24px; text-align: left; }
+  .home-greeting { font-size: 24px; padding: 20px 0 18px; text-align: left; }
+  .home-section { margin-bottom: 28px; }
   .peek { width: 100vw; animation: sheet-in .2s ease; }
   @keyframes sheet-in { from { transform: translateY(24px); opacity: 0; } }
-  .peek-body { padding: 14px 20px calc(80px + var(--safe-b)); }
+  .peek-body { padding: 8px 16px calc(40px + var(--safe-b)); }
+  .peek-top { height: 48px; padding: 0 6px; }
+  .peek-top .icon-btn { width: 40px; height: 40px; }
   .peek-title { font-size: 24px; }
-  .prop-name { width: 128px; }
+  .prop-name { width: 146px; }
   .editor { font-size: 16px; }
   .blk-handle { display: none; }
   .db-bar { flex-wrap: wrap; row-gap: 0; }
@@ -1150,7 +1156,7 @@ button.stat:hover { background: var(--hover); }
   .modal-wrap { align-items: flex-end; padding: 0; }
   .modal, .modal.wide { width: 100%; max-height: 92vh; border-radius: 14px 14px 0 0; padding-bottom: var(--safe-b); animation: sheet-in .2s ease; }
   .grid2 { grid-template-columns: 1fr; }
-  .form-prop .prop-name { width: 118px; }
+  .form-prop .prop-name { width: 140px; }
   .role-row .input { width: 140px; flex-basis: 140px; }
   .crumb-text { max-width: 140px; }
   .crumbs .crumb:not(:last-child):not(:nth-last-child(3)) { display: none; }
@@ -1163,7 +1169,7 @@ button.stat:hover { background: var(--hover); }
   .boards-grid { grid-template-columns: 1fr; }
   .list-props .due .ico { display: none; }
   .list-props .avatars { display: none; }
-  .prop-name { width: 112px; gap: 6px; }
+  .prop-name { width: 140px; gap: 6px; }
 }
 
 @media (hover: none) {
@@ -1172,6 +1178,80 @@ button.stat:hover { background: var(--hover); }
   .sb-item.tree .sb-emoji, .sb-item.tree:hover .sb-emoji { visibility: visible; }
   .sb-actions { display: inline-flex; }
   .cal-add { display: inline-flex; }
+}
+
+
+/* ---------- телефон: нижняя панель, «шторки» снизу, крупные касания ---------- */
+@media (max-width: 899px) {
+  .tabbar {
+    display: flex; align-items: stretch; flex-shrink: 0; height: calc(56px + var(--safe-b)); padding: 0 4px var(--safe-b);
+    background: var(--bg); box-shadow: inset 0 1px 0 var(--border); position: relative; z-index: 6;
+  }
+  .tab {
+    flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: var(--text-3); font-size: 11px; font-weight: 500; line-height: 1.1;
+  }
+  .tab.active { color: var(--text); }
+  .tab-icon { position: relative; display: inline-flex; }
+  .tab-icon .ico { width: 24px; height: 24px; }
+  .tab.active .tab-icon .ico { stroke-width: 2.1; }
+  .tab-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+  .tab-badge {
+    position: absolute; top: -5px; left: 14px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: #e03e3e; color: #fff; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; box-shadow: 0 0 0 2px var(--bg);
+  }
+  .tab-plus { display: inline-flex; align-items: center; justify-content: center; width: 46px; height: 36px; border-radius: 12px; background: var(--blue); color: #fff; }
+  .tab-plus .ico { width: 22px; height: 22px; stroke-width: 2.2; }
+  .tab-new:active .tab-plus { background: var(--blue-hover); }
+  .sb-nav { display: none; }   /* поиск, главная и мои задачи — уже в нижней панели */
+  .board-tile.add { min-height: 64px; }
+  .modal .btn-row.end { flex-wrap: nowrap; }
+  .modal .btn-row.end .btn { flex: 1 1 0; height: 44px; justify-content: center; font-size: 15px; }
+  body.kb-open .tabbar, body.kb-open .peek-foot { display: none; }
+  .toast { bottom: calc(76px + var(--safe-b)); max-width: calc(100vw - 32px); }
+
+  /* карточка задачи: смена статуса закреплена снизу */
+  .peek-foot {
+    display: flex; gap: 8px; flex-shrink: 0; padding: 10px 16px calc(10px + var(--safe-b));
+    background: var(--bg); box-shadow: inset 0 1px 0 var(--border);
+  }
+  .peek-foot .btn { flex: 1 1 0; min-width: 0; height: 44px; font-size: 15px; justify-content: center; border-radius: 10px; padding: 0 8px; }
+  .peek-actions .btn { height: 36px; }
+
+  /* меню, выбор даты и эмодзи выезжают снизу */
+  .sheet-layer { background: var(--scrim); animation: fade .15s ease; }
+  .menu.as-sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; min-width: 0; max-width: none;
+    max-height: 78vh; max-height: 78dvh; border-radius: 14px 14px 0 0; padding: 8px 0 calc(12px + var(--safe-b)); animation: sheet-in .2s ease;
+  }
+  .menu.as-sheet::before { content: ""; display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--border-strong); margin: 0 auto 10px; }
+  .as-sheet .menu-title { font-size: 13px; padding: 2px 20px 8px; }
+  .as-sheet .menu-item { min-height: 46px; font-size: 16px; padding: 0 14px; gap: 12px; width: calc(100% - 12px); margin: 0 6px; border-radius: 8px; }
+  .as-sheet .menu-item .ico, .as-sheet .menu-emoji { width: 20px; height: 20px; font-size: 18px; }
+  .as-sheet .menu-hint { font-size: 14px; max-width: 45%; }
+  .as-sheet .menu-search { height: 40px; margin: 2px 12px 8px; width: calc(100% - 24px); }
+  .datepicker.as-sheet .dp-grid { padding: 0 12px 6px; gap: 4px; }
+  .datepicker.as-sheet .dp-day { height: 42px; font-size: 16px; }
+  .datepicker.as-sheet .dp-wd { font-size: 12px; }
+  .emoji-menu.as-sheet .emoji-grid { grid-template-columns: repeat(8, 1fr); padding: 0 8px; }
+
+  /* поля ввода не мельче 16px — иначе iPhone увеличивает страницу при вводе */
+  .input, .menu-search, .db-search-input, .comment-input, .composer-input, .new-row-input, .peek-desc-input { font-size: 16px; }
+
+  /* крупнее зоны касания */
+  .topbar .icon-btn, .modal-head .icon-btn { width: 36px; height: 36px; }
+  .list-row { min-height: 56px; padding: 8px 4px; }
+  .check-circle { width: 22px; height: 22px; position: relative; }
+  .check-circle::after { content: ""; position: absolute; inset: -11px; }
+  .db-tab { height: 40px; }
+  .sb-item, .sb-profile { min-height: 40px; }
+}
+
+/* на сенсорных экранах — отклик на касание вместо наведения */
+@media (hover: none) {
+  a, button, .card, .list-row { -webkit-tap-highlight-color: transparent; }
+  .tab:active, .list-row:active, .menu-item:active, .sb-item:active, .page-tile:active { background: var(--hover); }
+  .card:active { box-shadow: var(--shadow-card-hover); }
 }
 
 /* Telegram: системные отступы и без лишнего «пружинящего» скролла */
