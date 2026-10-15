@@ -693,6 +693,18 @@ async def workspace_trash(request: web.Request) -> web.Response:
 
 
 # ---------- команда, напоминания, доступ (главный администратор) ----------
+async def team_unmatched(request: web.Request) -> web.Response:
+    _require_superadmin(request)
+    return _ok(_service(request).unmatched_names())
+
+
+async def member_alias(request: web.Request) -> web.Response:
+    service = _service(request)
+    body = await _json(request)
+    member = service.add_alias(_global_actor(request), _int(request, "mid"), str(body.get("name") or ""))
+    return _ok(member.to_dict())
+
+
 async def member_save(request: web.Request) -> web.Response:
     service = _service(request)
     member = service.save_member(_global_actor(request), await _json(request))
@@ -865,6 +877,8 @@ def create_app(service: Service) -> web.Application:
     r.add_post("/api/pages/{page_id:\\d+}/purge", page_purge)
 
     r.add_post("/api/members", member_save)
+    r.add_post("/api/members/{mid:\\d+}/alias", member_alias)
+    r.add_get("/api/team/unmatched", team_unmatched)
     r.add_post("/api/settings", settings_save)
     r.add_get("/api/admin", admin_overview)
     r.add_post("/api/admin/users", admin_user_create)

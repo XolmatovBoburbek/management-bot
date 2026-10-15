@@ -1181,6 +1181,19 @@ button.stat:hover { background: var(--hover); }
 }
 
 
+/* ---------- имена из таблиц без участника ---------- */
+.unmatched { margin: 4px 0 18px; padding: 12px 14px; border-radius: 10px; background: var(--c-yellow-col, rgba(251, 243, 219, .6)); box-shadow: inset 0 0 0 1px var(--border); }
+.unmatched-head { font-weight: 600; margin-bottom: 6px; }
+.unmatched-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--border); }
+.unmatched-row:first-child { border-top: 0; }
+.alias-suggest { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -4px 0 14px; }
+.alias-suggest > .muted { flex-basis: 100%; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 14px; font-size: 13px; box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text); }
+.chip:hover { background: var(--hover); }
+.chip.close { box-shadow: inset 0 0 0 1.5px var(--blue); }
+.chip.on { background: var(--blue); color: #fff; box-shadow: none; }
+.chip-count { font-size: 11px; opacity: .7; }
+
 /* ---------- телефон: нижняя панель, «шторки» снизу, крупные касания ---------- */
 @media (max-width: 899px) {
   .tabbar {

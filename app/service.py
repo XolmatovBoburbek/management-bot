@@ -192,6 +192,31 @@ class Service:
             is_observer=bool(data.get("is_observer")),
         )
 
+    # ---------- имена из таблиц без участника ----------
+    def unmatched_names(self) -> list[dict]:
+        """Имена из колонки «Ответственный», которые не узнал ни один участник, — с числом открытых задач."""
+        team = self.team()
+        found: dict[str, dict] = {}
+        for project in self.db.list_projects():
+            for task in self.db.list_tasks(project.id):
+                for name in team.match(task.responsible)[1]:
+                    item = found.setdefault(norm_text(name), {"name": name, "tasks": 0, "projects": []})
+                    item["tasks"] += 1
+                    if project.name not in item["projects"]:
+                        item["projects"].append(project.name)
+        return sorted(found.values(), key=lambda x: (-x["tasks"], x["name"]))
+
+    def add_alias(self, actor: Member, member_id: int, name: str) -> Member:
+        """Закрепляет имя из таблицы за участником: все задачи с этим именем станут его."""
+        self._require_admin(actor)
+        member = self.db.get_member(member_id)
+        if not member:
+            raise LookupError("Участник не найден")
+        if not norm_text(name):
+            raise ValueError("Укажите имя")
+        self._merge_aliases(member, name)
+        return self.db.get_member(member_id)  # type: ignore[return-value]
+
     # ---------- кто запускал бота ----------
     def bot_contacts(self) -> list[dict]:
         """Все, кто писал боту в личку, — и с кем из команды и каким аккаунтом кабинета они связаны."""

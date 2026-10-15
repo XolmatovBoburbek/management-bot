@@ -1474,6 +1474,8 @@ async function viewTeam() {
   if (!isSuperadmin()) return errorView({ status: 403, message: "Раздел доступен главному администратору" });
   S.boot = await api("/api/bootstrap");
   const members = S.boot.members;
+  const unmatched = (await api("/api/team/unmatched")).data;
+  S.unmatched = unmatched;
   const flags = (m) => [m.is_admin ? tag("админ", "purple", "sm") : null, m.is_pm ? tag("PM", "blue", "sm") : null,
     m.is_observer ? tag("наблюдатель", "gray", "sm") : null];
   return {
@@ -1482,6 +1484,7 @@ async function viewTeam() {
     body: h("div", { class: "page full" },
       h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "👥"), h("h1", { class: "page-title" }, "Команда"),
         h("p", { class: "page-lead" }, "Участники, которым бот пишет в Telegram. Имя должно совпадать с колонкой «Ответственный» в таблице.")),
+      unmatchedBlock(unmatched),
       h("div", { class: "db-bar" }, h("div", { class: "db-tabs" }, h("span", { class: "db-tab active" }, icon("table"), h("span", null, `Участники · ${members.filter((m) => m.active).length}`))),
         h("div", { class: "db-tools" }, h("button", { class: "btn primary sm", onclick: () => memberModal(null) }, "Добавить участника"))),
       h("div", { class: "table-wrap" }, h("table", { class: "db-table" },
@@ -1497,6 +1500,50 @@ async function viewTeam() {
           h("td", null, h("div", { class: "cell-inner wrap" }, flags(m),
             m.assists_id && member(m.assists_id) ? h("span", { class: "muted small" }, "помогает: " + member(m.assists_id).name) : null)))))))),
   };
+}
+
+/** Похожесть имён: «Владимер» ~ «Владимир», «Олимжон» ~ «Олимхон». */
+function nameDistance(a, b) {
+  a = a.toLowerCase().replace(/ё/g, "е"); b = b.toLowerCase().replace(/ё/g, "е");
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]; row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cur = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+  }
+  return row[b.length];
+}
+function similarName(a, b) {
+  const x = a.split(/\s+/)[0], y = b.split(/\s+/)[0];
+  return x.length > 2 && y.length > 2 && nameDistance(x, y) <= Math.max(1, Math.floor(Math.min(x.length, y.length) / 4));
+}
+
+/** Имена из таблиц, за которыми не закреплён никто: закрепить за участником — и все его задачи станут его. */
+function unmatchedBlock(unmatched) {
+  if (!unmatched.length) return null;
+  return h("div", { class: "unmatched" },
+    h("div", { class: "unmatched-head" }, "🔗 Имена из таблиц без участника",
+      h("span", { class: "muted small" }, " — задачи на эти имена сейчас никому не приходят")),
+    h("div", { class: "unmatched-list" }, unmatched.map((u) => h("div", { class: "unmatched-row" },
+      h("b", null, u.name), h("span", { class: "muted small" }, `${u.tasks} ${u.tasks === 1 ? "задача" : u.tasks < 5 ? "задачи" : "задач"} · ${u.projects.join(", ")}`),
+      h("span", { class: "grow" }),
+      h("button", { class: "btn sm primary", onclick: (e) => assignNameMenu(e.currentTarget, u.name) }, "Закрепить за…")))));
+}
+
+function assignNameMenu(anchor, name) {
+  const people = S.boot.members.filter((m) => m.active)
+    .map((m) => ({ m, close: similarName(name, m.name) || (m.aliases || "").split(/[,;]/).some((a) => similarName(name, a.trim())) }))
+    .sort((a, b) => b.close - a.close);
+  popMenu(anchor, people.map(({ m, close }) => ({
+    label: h("span", { class: "menu-person" }, avatar(m.name, m.id, "xs"), m.name), hint: close ? "похоже" : (m.username ? "@" + m.username : ""),
+    onClick: async () => {
+      await run(() => api(`/api/members/${m.id}/alias`, { json: { name } }), `«${name}» закреплено за ${m.name}`);
+      renderRoute({ force: true, keepScroll: true });
+    },
+  })), { title: `За кем закрепить «${name}»?`, search: people.length > 6 ? "Найти участника…" : null });
 }
 
 function memberModal(m) {
@@ -1515,10 +1562,31 @@ function memberModal(m) {
     is_observer: [h("input", { type: "checkbox", checked: m && m.is_observer }), "Наблюдатель", "Видит весь проект и получает сводку, ничего не меняет"],
     active: [h("input", { type: "checkbox", checked: !m || m.active }), "Активен", "Неактивным бот не пишет"],
   };
+  const names = h("div", { class: "alias-suggest" });
+  const drawNames = () => {
+    const list = (S.unmatched || []).slice()
+      .map((u) => ({ ...u, close: !!f.name.value.trim() && similarName(u.name, f.name.value.trim()) }))
+      .sort((a, b) => b.close - a.close || b.tasks - a.tasks);
+    const have = new Set(f.aliases.value.split(/[,;]/).map((a) => a.trim().toLowerCase()).filter(Boolean));
+    fill(names, list.length ? h("span", { class: "muted small" }, "Имена из таблиц без участника — нажмите, чтобы закрепить:") : null,
+      ...list.slice(0, 12).map((u) => h("button", {
+        type: "button", class: "chip" + (have.has(u.name.toLowerCase()) ? " on" : "") + (u.close ? " close" : ""),
+        onclick: () => {
+          const parts = f.aliases.value.split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+          const i = parts.findIndex((a) => a.toLowerCase() === u.name.toLowerCase());
+          if (i >= 0) parts.splice(i, 1); else parts.push(u.name);
+          f.aliases.value = parts.join(", ");
+          drawNames();
+        },
+      }, u.name, h("span", { class: "chip-count" }, u.tasks))));
+  };
+  f.name.addEventListener("input", drawNames);
+  drawNames();
   const close = modal(m ? m.name : "Новый участник", h("div", null,
     h("div", { class: "grid2" }, field("Имя", f.name), field("Telegram-ник", f.username)),
     h("div", { class: "grid2" }, field("Роль", f.role), field("Телефон (для обзвона)", f.phone)),
-    field("Другие написания", f.aliases),
+    field("Другие написания", f.aliases, "Все задачи, где в «Ответственном» стоит одно из этих имён, будут его"),
+    names,
     field("Выполняет задачи за", f.assists_id, "Получит те же задачи и напоминания"),
     Object.values(checks).map(([input, title, hint]) => h("label", { class: "check" }, input, h("span", null, h("b", null, title), h("span", { class: "muted small block" }, hint)))),
     h("div", { class: "btn-row end" }, h("button", { class: "btn ghost", onclick: () => close() }, "Отмена"),

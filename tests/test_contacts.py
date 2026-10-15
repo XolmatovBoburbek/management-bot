@@ -69,3 +69,23 @@ def test_team_yaml_adds_new_spellings_to_existing_member(service, tmp_path: Path
     assert [m.name for m in team.match("Олимжон")[0]] == ["Олимхон"]
     service.seed_team(team_file)  # повторный запуск не дублирует варианты
     assert service.db.member_by_username("khodjaevo").aliases == "Олимжон, Olimxon"
+
+
+async def test_admin_attaches_table_names_to_member(client, service, workbook):
+    from tests.test_web import upload
+    admin = await tg(client)
+    await upload(client, workbook, admin)
+    project = service.default_project()
+    task = service.db.list_tasks(project.id)[0]
+    service.db.update_task(task.id, responsible="Владимер")
+    names = {u["name"]: u for u in (await (await client.get("/api/team/unmatched", headers=admin)).json())["data"]}
+    assert names["Владимер"]["tasks"] == 1 and names["Владимер"]["projects"] == [project.name]
+
+    vova = service.db.upsert_member(name="Владимир", username="vova")
+    sarvar = await tg(client, 106, "gflwwc")
+    assert (await client.get("/api/team/unmatched", headers=sarvar)).status == 403
+    resp = await client.post(f"/api/members/{vova.id}/alias", json={"name": "Владимер"}, headers=admin)
+    assert "Владимер" in (await resp.json())["data"]["aliases"]
+    assert [m.name for m in service.team().assignees(service.get_task(task.id))] == ["Владимир"]
+    names = {u["name"] for u in (await (await client.get("/api/team/unmatched", headers=admin)).json())["data"]}
+    assert "Владимер" not in names
