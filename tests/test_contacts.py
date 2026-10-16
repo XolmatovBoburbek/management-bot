@@ -11,6 +11,7 @@ async def contacts(client, admin) -> dict:
 
 
 async def test_bot_remembers_everyone_who_writes_in_private(env, service, notifier):
+    service.db.bind_telegram(service.db.member_by_username("rrkaier").id, 105)
     await feed(env, message=message(5555, "ilhom_new", "/start"))   # не из команды
     await feed(env, message=message(4242, "asl_offf", "/start"))    # из команды — бот сам свяжет по нику
     await feed(env, message=message(6666, "group_guy", "/summary", chat_type="supergroup", chat_id=-100777))
@@ -19,7 +20,7 @@ async def test_bot_remembers_everyone_who_writes_in_private(env, service, notifi
     assert found[4242]["member_name"] == "Асл"
     assert 6666 not in found  # в группе бота не «запускали»
     # руководителю — подсказка, где связать человека
-    note = next(m for m in notifier.to(102) if "не из команды" in m)
+    note = next(m for m in notifier.to(105) if "не из команды" in m)
     assert "Запустили бота" in note
 
 
@@ -89,3 +90,28 @@ async def test_admin_attaches_table_names_to_member(client, service, workbook):
     assert [m.name for m in service.team().assignees(service.get_task(task.id))] == ["Владимир"]
     names = {u["name"] for u in (await (await client.get("/api/team/unmatched", headers=admin)).json())["data"]}
     assert "Владимер" not in names
+
+
+async def test_similar_names_attach_to_registered_members(client, service, workbook):
+    from tests.test_web import upload
+    admin = await tg(client)
+    await upload(client, workbook, admin)
+    tasks = service.db.list_tasks(service.default_project().id)
+    service.db.update_task(tasks[0].id, responsible="Владимер")
+    service.db.update_task(tasks[1].id, responsible="Незнакомец")
+    vova = service.db.upsert_member(name="Владимир")
+    resp = await client.post("/api/team/auto-attach", json={}, headers=admin)
+    assert (await resp.json())["data"] == []  # Владимир ещё не зарегистрирован в боте
+    service.db.bind_telegram(vova.id, 8080)
+    preview = (await (await client.post("/api/team/auto-attach", json={}, headers=admin)).json())["data"]
+    assert [(p["name"], p["member_name"]) for p in preview] == [("Владимер", "Владимир")]
+    await client.post("/api/team/auto-attach", json={"apply": True}, headers=admin)
+    assert [m.name for m in service.team().assignees(service.get_task(tasks[0].id))] == ["Владимир"]
+    assert not service.team().assignees(service.get_task(tasks[1].id))
+
+
+def test_events_recipient_from_team_yaml_and_settings(service):
+    assert [m.username for m in service.event_recipients()] == ["rrkaier"]
+    shahzod = service.db.member_by_username("s_maxhan")
+    service.update_settings({"events_to": str(shahzod.id)}, shahzod)
+    assert [m.name for m in service.event_recipients()] == ["Шахзод"]

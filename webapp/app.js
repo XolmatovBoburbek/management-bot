@@ -677,6 +677,16 @@ async function viewHome() {
   const recent = recentItems();
   const out = [];
   out.push(h("h1", { class: "home-greeting" }, greeting()));
+  if (isSuperadmin()) {
+    const unmatched = (await api("/api/team/unmatched")).data;
+    if (unmatched.length) {
+      const total = unmatched.reduce((n, u) => n + u.tasks, 0);
+      out.push(h("a", { class: "home-alert", href: "#/team" }, h("span", null, "🔗"),
+        h("span", { class: "grow" }, h("b", null, `${unmatched.length} ${unmatched.length === 1 ? "имя" : unmatched.length < 5 ? "имени" : "имён"} из таблиц без участника`),
+          h("span", { class: "muted small block" }, `${total} задач никому не приходят: ${unmatched.slice(0, 4).map((u) => u.name).join(", ")}${unmatched.length > 4 ? "…" : ""}`)),
+        h("span", { class: "btn sm primary" }, "Назначить")));
+    }
+  }
   if (S.boot.workspaces.length > 1) {
     out.push(h("div", { class: "home-section" }, sectionTitle("🗂 Ваши пространства", S.boot.workspaces.length),
       h("div", { class: "pages-grid" }, S.boot.workspaces.map((w) => h("a", {
@@ -1476,6 +1486,7 @@ async function viewTeam() {
   const members = S.boot.members;
   const unmatched = (await api("/api/team/unmatched")).data;
   S.unmatched = unmatched;
+  S.autoAttach = unmatched.length ? (await api("/api/team/auto-attach", { json: {} })).data : [];
   const flags = (m) => [m.is_admin ? tag("админ", "purple", "sm") : null, m.is_pm ? tag("PM", "blue", "sm") : null,
     m.is_observer ? tag("наблюдатель", "gray", "sm") : null];
   return {
@@ -1526,11 +1537,21 @@ function unmatchedBlock(unmatched) {
   if (!unmatched.length) return null;
   return h("div", { class: "unmatched" },
     h("div", { class: "unmatched-head" }, "🔗 Имена из таблиц без участника",
-      h("span", { class: "muted small" }, " — задачи на эти имена сейчас никому не приходят")),
+      h("span", { class: "muted small" }, " — задачи на эти имена сейчас никому не приходят"),
+      S.autoAttach && S.autoAttach.length ? h("button", { class: "btn sm auto-attach", onclick: autoAttach },
+        icon("sparkle"), `Закрепить похожие (${S.autoAttach.length})`) : null),
     h("div", { class: "unmatched-list" }, unmatched.map((u) => h("div", { class: "unmatched-row" },
       h("b", null, u.name), h("span", { class: "muted small" }, `${u.tasks} ${u.tasks === 1 ? "задача" : u.tasks < 5 ? "задачи" : "задач"} · ${u.projects.join(", ")}`),
       h("span", { class: "grow" }),
       h("button", { class: "btn sm primary", onclick: (e) => assignNameMenu(e.currentTarget, u.name) }, "Закрепить за…")))));
+}
+
+/** Похожие имена («Владимер» → Владимир) — тем, кто зарегистрирован в боте, после подтверждения. */
+async function autoAttach() {
+  const list = S.autoAttach.map((a) => `«${a.name}» → ${a.member_name} (${a.tasks})`).join("\n");
+  if (!(await confirmDialog(`Закрепить имена за похожими участниками, которые зарегистрированы в боте?\n\n${list}`, "Закрепить", false))) return;
+  await run(() => api("/api/team/auto-attach", { json: { apply: true } }), "Задачи закреплены");
+  renderRoute({ force: true, keepScroll: true });
 }
 
 function assignNameMenu(anchor, name) {
@@ -1612,6 +1633,8 @@ async function viewReminders() {
     checks_per_day: h("input", { class: "input", type: "number", min: 1, max: 20, value: s.checks_per_day }),
     sync_minutes: h("input", { class: "input", type: "number", min: 0, max: 1440, value: s.sync_minutes }),
     weekly_day: h("select", { class: "input" }, WEEKDAY_NAMES.map((n, i) => h("option", { value: i, selected: String(i) === String(s.weekly_day) }, n))),
+    events_to: h("select", { class: "input" }, h("option", { value: "" }, "Всем PM"),
+      S.boot.members.filter((m) => m.active).map((m) => h("option", { value: m.id, selected: String(m.id) === String(s.events_to) }, m.name))),
   };
   return {
     title: "Напоминания",
@@ -1627,6 +1650,7 @@ async function viewReminders() {
         settingsRow("Вопросов «выполнено?» в день", "Сколько задач максимум спрашивать у человека за раз", f.checks_per_day),
         settingsRow("Синхронизация с Google, мин", "0 — не синхронизировать автоматически", f.sync_minutes),
         settingsRow("Недельный обзор", "День, когда бот напомнит про задачи без срока", f.weekly_day),
+        settingsRow("Новые люди и правки участников", "Кому писать, что кто-то запустил бота, добавил себе задачу или перенёс срок", f.events_to),
         callout(s.group_chat_id ? "✅" : "💬", s.group_chat_id ? "Рабочая группа подключена — сводки и закрытые задачи уходят туда."
           : "Группа не подключена: добавьте бота в рабочую группу и отправьте там /bind_group.", s.group_chat_id ? "green" : "gray"),
         h("div", { class: "btn-row" }, h("button", { class: "btn primary", onclick: async () => {

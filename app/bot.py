@@ -166,14 +166,20 @@ def build_router(service: Service) -> Router:
             await message.answer(f"Напишите мне в личку: https://t.me/{service.bot_username}")
             return
         user = message.from_user
+        was_connected = bool(user and service.db.member_by_telegram(user.id))
         member = actor_for(user)
+        if member and not was_connected:
+            for admin in service.event_recipients():
+                if admin.telegram_id and admin.id != member.id:
+                    await service.notifier.send(admin.telegram_id, f"✅ {texts.e(member.name)} подключился к боту "
+                                                f"({texts.e(member.mention)}).")
         if not member:
             uname = f"@{user.username}" if user and user.username else "(ника нет)"
             await message.answer(
                 f"Здравствуйте! Я бот проектного менеджмента IAC Media.\n\n"
                 f"Вашего ника {texts.e(uname)} нет в списке команды. Попросите администратора добавить вас.")
             if user and service.db.mark_sent(f"unknown:{user.id}"):
-                for pm in service._pms():
+                for pm in service.event_recipients():
                     if pm.telegram_id:
                         await service.notifier.send(
                             pm.telegram_id,

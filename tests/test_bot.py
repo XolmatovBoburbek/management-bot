@@ -80,9 +80,14 @@ async def test_start_known_and_unknown_user(env, service, notifier):
     assert "Асл, вы подключены" in text
     assert session.sent(SetChatMenuButton)
     assert service.db.member_by_telegram(4242).name == "Асл"
+    # о новых людях — только тому, кто выбран (по team.yaml это Бабур), а не всем PM
+    service.db.bind_telegram(member(service, "rrkaier").id, 105)
     await feed(env, message=message(5555, "random_guy", "/start"))
     assert "нет в списке команды" in session.sent()[-1].text
-    assert any("не из команды" in m for m in notifier.to(102))
+    assert any("не из команды" in m for m in notifier.to(105))
+    assert not any("не из команды" in m for m in notifier.to(102))
+    await feed(env, message=message(4343, "ngmtvu", "/start"))
+    assert any("Улугбек подключился к боту" in m for m in notifier.to(105))
 
 
 async def test_admin_uploads_excel_and_member_marks_done(env, service, notifier):

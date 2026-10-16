@@ -798,7 +798,7 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .creds .big { font-size: 20px; font-weight: 600; letter-spacing: .04em; }
 .emoji-pick { width: 44px; height: 40px; font-size: 26px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px; }
 .emoji-pick:hover { background: var(--hover); }
-.confirm-text { margin: 0 0 4px; }
+.confirm-text { margin: 0 0 4px; white-space: pre-line; }
 
 /* ---------- обзор ---------- */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-top: 4px; }
@@ -1183,7 +1183,10 @@ button.stat:hover { background: var(--hover); }
 
 /* ---------- имена из таблиц без участника ---------- */
 .unmatched { margin: 4px 0 18px; padding: 12px 14px; border-radius: 10px; background: var(--c-yellow-col, rgba(251, 243, 219, .6)); box-shadow: inset 0 0 0 1px var(--border); }
-.unmatched-head { font-weight: 600; margin-bottom: 6px; }
+.unmatched-head { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.unmatched-head .auto-attach { margin-left: auto; }
+.home-alert { display: flex; align-items: center; gap: 12px; padding: 12px 14px; margin-bottom: 28px; border-radius: 10px; background: var(--c-yellow-col, rgba(251, 243, 219, .6)); box-shadow: inset 0 0 0 1px var(--border); color: var(--text); }
+.home-alert:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .unmatched-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--border); }
 .unmatched-row:first-child { border-top: 0; }
 .alias-suggest { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -4px 0 14px; }

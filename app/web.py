@@ -698,6 +698,13 @@ async def team_unmatched(request: web.Request) -> web.Response:
     return _ok(_service(request).unmatched_names())
 
 
+async def team_auto_attach(request: web.Request) -> web.Response:
+    """Похожие имена из таблиц → участникам, подключённым к боту. apply=false — только показать."""
+    _require_superadmin(request)
+    body = await _json(request)
+    return _ok(_service(request).auto_attach_names(apply=bool(body.get("apply"))))
+
+
 async def member_alias(request: web.Request) -> web.Response:
     service = _service(request)
     body = await _json(request)
@@ -879,6 +886,7 @@ def create_app(service: Service) -> web.Application:
     r.add_post("/api/members", member_save)
     r.add_post("/api/members/{mid:\\d+}/alias", member_alias)
     r.add_get("/api/team/unmatched", team_unmatched)
+    r.add_post("/api/team/auto-attach", team_auto_attach)
     r.add_post("/api/settings", settings_save)
     r.add_get("/api/admin", admin_overview)
     r.add_post("/api/admin/users", admin_user_create)

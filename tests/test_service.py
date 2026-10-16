@@ -396,17 +396,18 @@ def test_existing_database_gets_new_member_columns(tmp_path):
 
 async def test_member_adds_own_tasks_and_moves_own_deadlines(service, workbook, notifier):
     project = await load(service, workbook)
+    service.db.bind_telegram(member(service, "rrkaier").id, 105)  # такие сообщения получает Бабур
     sarvar = member(service, "gflwwc")
     notifier.messages.clear()
     # участник добавляет задачу — ответственным всегда становится он сам, руководитель узнаёт
     task = await service.create_task(project, {"title": "Макет баннера", "responsible": "Сардор", "deadline": "25.10"}, sarvar)
     assert task.responsible == "Сарвар" and task.deadline == date(2026, 10, 25)
-    assert any("добавил(а) себе задачу" in m and "Макет баннера" in m for m in notifier.to(102))
+    assert any("добавил(а) себе задачу" in m and "Макет баннера" in m for m in notifier.to(105))
     # свой срок меняет сам, руководитель видит было → стало
     notifier.messages.clear()
     moved = await service.update_task(task, {"deadline": "27.10", "description": "до печати"}, sarvar)
     assert moved.deadline == date(2026, 10, 27) and moved.description == "до печати"
-    assert any("изменил(а) срок" in m for m in notifier.to(102))
+    assert any("изменил(а) срок" in m for m in notifier.to(105))
     # чужое и лишнее — нельзя
     with pytest.raises(AccessError):
         await service.update_task(moved, {"responsible": "Сардор"}, sarvar)

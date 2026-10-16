@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "group_chat_id": "",
     "weekly_day": "0",
     "checks_per_day": "5",
+    "events_to": "",  # кому сообщать о новых людях в боте и задачах участников (id участника; пусто — PM)
 }
 NUMERIC_SETTINGS = {"sync_minutes": (0, 1440), "checks_per_day": (1, 20), "weekly_day": (0, 6)}
 STAGE_COLORS = {"default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"}
@@ -70,6 +71,25 @@ class Notifier(Protocol):
     async def send(self, chat_id: int, text: str, keyboard: InlineKeyboardMarkup | None = None) -> bool: ...
 
     async def send_document(self, chat_id: int, data: bytes, filename: str, caption: str = "") -> bool: ...
+
+
+def _distance(a: str, b: str) -> int:
+    row = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        prev, row[0] = row[0], i
+        for j in range(1, len(b) + 1):
+            cur = row[j]
+            row[j] = min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] != b[j - 1]))
+            prev = cur
+    return row[len(b)]
+
+
+def similar_name(a: str, b: str) -> bool:
+    """«Владимер» ~ «Владимир», «Олимжон» ~ «Олимхон»: первое слово отличается на 1–2 буквы."""
+    x, y = (norm_text(a).split(" ") or [""])[0], (norm_text(b).split(" ") or [""])[0]
+    if len(x) < 3 or len(y) < 3:
+        return False
+    return _distance(x, y) <= max(1, min(len(x), len(y)) // 4)
 
 
 class Service:
@@ -109,8 +129,16 @@ class Service:
                 low, high = NUMERIC_SETTINGS[key]
                 if not value.isdigit() or not low <= int(value) <= high:
                     raise ValueError(f"Значение «{value}» должно быть числом от {low} до {high}")
+            if key == "events_to" and value and not (value.isdigit() and self.db.get_member(int(value))):
+                raise ValueError("Участник не найден")
             self.db.set_setting(key, value)
         return self.settings()
+
+    def event_recipients(self) -> list[Member]:
+        """Кому сообщать о новых людях в боте, задачах и переносах сроков участников."""
+        chosen = self.settings().get("events_to")
+        member = self.db.get_member(int(chosen)) if chosen and chosen.isdigit() else None
+        return [member] if member and member.active else self._pms()
 
     def team(self) -> logic.Team:
         return logic.Team(self.db.list_members())
@@ -146,6 +174,13 @@ class Service:
                 is_admin=bool(item.get("admin")), is_pm=bool(item.get("pm")),
                 is_observer=bool(item.get("observer")),
             )))
+        if not self.settings().get("events_to"):
+            for item in data.get("members", []):
+                if item.get("events"):
+                    target = self.db.member_by_username(str(item.get("username", "")))
+                    if target:
+                        self.db.set_setting("events_to", str(target.id))
+                        break
         for item, member in created:
             target = self.db.member_by_username(str(item.get("assists", "")))
             if target and target.id != member.id:
@@ -205,6 +240,20 @@ class Service:
                     if project.name not in item["projects"]:
                         item["projects"].append(project.name)
         return sorted(found.values(), key=lambda x: (-x["tasks"], x["name"]))
+
+    def auto_attach_names(self, apply: bool = False) -> list[dict]:
+        """Имена из таблиц без участника, похожие ровно на одного участника, подключённого к боту
+        («Владимер» → Владимир). apply=True — сразу закрепляет."""
+        members = [m for m in self.db.list_members() if m.telegram_id]
+        out = []
+        for item in self.unmatched_names():
+            hits = [m for m in members if any(similar_name(item["name"], n)
+                                              for n in [m.name, *re.split(r"[,;]", m.aliases or "")] if n.strip())]
+            if len(hits) == 1:
+                out.append({**item, "member_id": hits[0].id, "member_name": hits[0].name})
+                if apply:
+                    self._merge_aliases(self.db.get_member(hits[0].id), item["name"])  # type: ignore[arg-type]
+        return out
 
     def add_alias(self, actor: Member, member_id: int, name: str) -> Member:
         """Закрепляет имя из таблицы за участником: все задачи с этим именем станут его."""
@@ -478,7 +527,7 @@ class Service:
             raise AccessError("Добавлять задачи могут участники команды — попросите администратора связать аккаунт")
 
     async def _tell_pms(self, actor: Member, text: str, task: Task) -> None:
-        for pm in self._pms():
+        for pm in self.event_recipients():
             if pm.telegram_id and pm.id != actor.id:
                 await self.notifier.send(pm.telegram_id, text, keyboards.task_actions(task, self.webapp_url))
 
