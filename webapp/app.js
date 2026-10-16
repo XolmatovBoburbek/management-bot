@@ -5,6 +5,7 @@
 const VIEW_HANDLERS = {
   home: viewHome,
   my: viewMy,
+  all: viewAll,
   project: viewProject,
   page: viewPage,
   trash: viewTrash,
@@ -234,6 +235,7 @@ function parseHash() {
     const rest = parts.slice(2);
     if (!rest.length) r.name = "home";
     else if (rest[0] === "my") r.name = "my";
+    else if (rest[0] === "all") r.name = "all";
     else if (rest[0] === "p" && Number(rest[1])) { r.name = "project"; r.params = { pid: rest[1], section: rest[2] || "" }; }
     else if (rest[0] === "page" && Number(rest[1])) { r.name = "page"; r.params = { id: Number(rest[1]) }; }
     else if (rest[0] === "trash") r.name = "trash";
@@ -479,6 +481,7 @@ function renderSidebar() {
         sbItem("search", "Поиск", null, { onclick: openSearch, hint: navigator.platform.includes("Mac") ? "⌘K" : "Ctrl K" }),
         sbItem("home", "Главная", wsHref(), { active: r.name === "home" }),
         sbItem("check", "Мои задачи", wsHref("my"), { active: r.name === "my", badge: urgent || null })),
+      h("div", { class: "sb-group" }, sbItem("users", "Все задачи", wsHref("all"), { active: r.name === "all" })),
       S.boot.workspaces.length > 1 ? sbSection("Пространства", isSuperadmin() ? { title: "Новое пространство", onclick: () => go("#/admin/workspaces") } : null,
         S.boot.workspaces.map((w) => sbItem(wsBadge(w, "sm"), w.name, `#/w/${w.id}`, {
           cls: "ws-item" + (w.id === S.wid ? " current" : ""), hint: w.id === S.wid ? "✓" : null,
@@ -755,6 +758,27 @@ async function viewMy() {
     : renderTaskDB({ key: "my:" + S.wid, tasks: data.tasks, showProject: true, canCreate: canWrite(), noMine: true,
       defaults: { view: "list" }, readOnly: role() === "viewer" });
   return { title: "Мои задачи", crumbs: [{ icon: "☑️", label: "Мои задачи" }], body: h("div", { class: "page full" }, head, body) };
+}
+
+// ---------- все задачи (фильтр по человеку) ----------
+async function viewAll() {
+  const data = await api(`/api/w/${S.wid}/tasks`);
+  const key = "all:" + S.wid;
+  const saved = store("db:" + key) || {};
+  const open = data.tasks.filter(isOpen);
+  // люди, у которых есть задачи, — с числом открытых
+  const counts = {};
+  for (const t of open) for (const id of t.assignee_ids || []) counts[id] = (counts[id] || 0) + 1;
+  const people = peopleOf(data.tasks);
+  const pick = (value) => { store("db:" + key, { ...(store("db:" + key) || {}), member: value }); renderRoute({ force: true }); };
+  const chip = (value, label, n, m) => h("button", { class: "person-chip" + ((saved.member || "") === value ? " on" : ""), onclick: () => pick(value) },
+    m ? avatar(m.name, m.id, "xs") : null, label, n !== undefined ? h("span", { class: "chip-count" }, n) : null);
+  const head = h("div", { class: "page-head" }, h("div", { class: "page-icon" }, "👥"), h("h1", { class: "page-title" }, "Все задачи"),
+    h("div", { class: "person-chips-bar" }, chip("", "Все", open.length),
+      people.map((m) => chip(String(m.id), m.name, counts[m.id] || 0, m))));
+  const body = renderTaskDB({ key, tasks: data.tasks, showProject: true, canCreate: canWrite(), noMine: false,
+    defaults: { view: "list" }, readOnly: role() === "viewer" });
+  return { title: "Все задачи", crumbs: [{ icon: "👥", label: "Все задачи" }], body: h("div", { class: "page full" }, head, body) };
 }
 
 // ---------- страницы-документы ----------
@@ -1581,6 +1605,7 @@ function memberModal(m) {
     is_admin: [h("input", { type: "checkbox", checked: m && m.is_admin }), "Администратор в боте", "Загрузка таблиц и любые правки из Telegram"],
     is_pm: [h("input", { type: "checkbox", checked: m && m.is_pm }), "PM", "Получает эскалации и утреннюю сводку"],
     is_observer: [h("input", { type: "checkbox", checked: m && m.is_observer }), "Наблюдатель", "Видит весь проект и получает сводку, ничего не меняет"],
+    can_cover: [h("input", { type: "checkbox", checked: m && m.can_cover }), "Выполняет за других", "Может отметить выполненной чужую задачу, если человек не успевает"],
     active: [h("input", { type: "checkbox", checked: !m || m.active }), "Активен", "Неактивным бот не пишет"],
   };
   const names = h("div", { class: "alias-suggest" });

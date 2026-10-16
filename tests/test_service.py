@@ -417,3 +417,25 @@ async def test_member_adds_own_tasks_and_moves_own_deadlines(service, workbook, 
     observer = member(service, "ik7777777777")
     with pytest.raises(AccessError):
         await service.create_task(project, {"title": "x"}, observer)
+
+
+async def test_cover_for_colleague_and_full_self_edit(service, workbook, notifier):
+    project = await load(service, workbook)
+    olim = member(service, "khodjaevo")
+    assert olim.can_cover  # из team.yaml: covers: true
+    kv = by_title(service, project)["Key Visual мероприятия"]  # задача Сарвара
+    notifier.messages.clear()
+    done = await service.set_status(kv, "done", olim)
+    assert done.status in ("done", "done_late")
+    assert any("отметил(а) за вас" in m for m in notifier.to(SARVAR_TG))
+    assert "за Сарвар" in service.db.task_events(kv.id)[-1]["text"]
+    # без права — нельзя
+    with pytest.raises(AccessError):
+        await service.set_status(by_title(service, project)["Пресс-волл"], "done", member(service, "raxmanov7777"))
+    # свою задачу участник правит целиком, кроме ответственного
+    sarvar = member(service, "gflwwc")
+    press = by_title(service, project)["Пресс-волл"]
+    edited = await service.update_task(press, {"title": "Пресс-волл 7×3", "priority": "Высокий", "block": "ПЕЧАТЬ"}, sarvar)
+    assert edited.title == "Пресс-волл 7×3" and edited.block == "ПЕЧАТЬ"
+    with pytest.raises(AccessError):
+        await service.update_task(edited, {"responsible": "Асл"}, sarvar)

@@ -280,6 +280,7 @@ def _task_dict(task: Task, today: date, team: logic.Team, my_ids: set[int], acto
     data["assignee_ids"] = [m.id for m in team.assignees(task)]
     data["mine"] = task.id in my_ids
     data["can_edit"] = actor.is_admin or task.id in my_ids
+    data["can_cover"] = bool(actor.can_cover and not actor.is_observer and not data["can_edit"])
     return data
 
 
@@ -322,6 +323,22 @@ async def workspace_my(request: web.Request) -> web.Response:
         for task in logic.sorted_tasks(mine, today):
             items.append({**_task_dict(task, today, team, my_ids, actor), "project_name": project.name})
     return web.json_response({"tasks": items, "linked": actor.id > 0})
+
+
+async def workspace_all(request: web.Request) -> web.Response:
+    """Все задачи пространства — для фильтра по человеку."""
+    service = _service(request)
+    workspace, role = _workspace(request)
+    actor = _actor(request, role)
+    today = service.today()
+    team = service.team()
+    items = []
+    for project in service.projects(workspace.id):
+        tasks = service.db.list_tasks(project.id)
+        my_ids = {t.id for t in team.tasks_of(actor, tasks)}
+        for task in logic.sorted_tasks(tasks, today):
+            items.append({**_task_dict(task, today, team, my_ids, actor), "project_name": project.name})
+    return web.json_response({"tasks": items})
 
 
 async def workspace_search(request: web.Request) -> web.Response:
@@ -842,6 +859,7 @@ def create_app(service: Service) -> web.Application:
 
     r.add_get("/api/w/{wid:\\d+}", workspace_data)
     r.add_get("/api/w/{wid:\\d+}/my", workspace_my)
+    r.add_get("/api/w/{wid:\\d+}/tasks", workspace_all)
     r.add_get("/api/w/{wid:\\d+}/search", workspace_search)
     r.add_get("/api/w/{wid:\\d+}/trash", workspace_trash)
     r.add_post("/api/w/{wid:\\d+}/projects", project_create)

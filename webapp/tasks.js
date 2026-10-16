@@ -1161,7 +1161,8 @@ function peekContent(t) {
   const admin = isWsAdmin();
   const owners = people(t);
   const title = h("h1", { class: "peek-title" });
-  if (admin) editableText(title, t.title, (v) => patchTask(t, { title: v }, "Переименовано"));
+  const own = admin || t.can_edit;  // свою задачу участник правит сам (кроме ответственного)
+  if (own) editableText(title, t.title, (v) => patchTask(t, { title: v }, "Переименовано"));
   else title.textContent = t.title;
 
   const props = h("div", { class: "props" },
@@ -1175,10 +1176,10 @@ function peekContent(t) {
     prop("calendar", "Срок", t.deadline ? h("span", null, fmtDate(t.deadline, true),
       isOpen(t) ? h("span", { class: "prop-note" + (t.days_left < 0 ? " text-red" : "") }, " · " + daysText(t.days_left)) : null) : null,
     admin || t.can_edit ? (a) => editDate(a, t, "deadline") : null),
-    prop("flag", "Приоритет", priorityTag(t.priority), admin ? (a) => editPriority(a, t) : null),
+    prop("flag", "Приоритет", priorityTag(t.priority), own ? (a) => editPriority(a, t) : null),
     prop("tag", "Блок", t.block ? tag(t.block, colorFor(t.block)) : null,
-      admin ? (a) => editBlock(a, t, S.project && S.project.pid === t.project_id ? S.project.data.tasks : [t]) : null),
-    prop("building", "Подрядчик", t.contractor || null, admin ? () => editText(t, "contractor", "Подрядчик") : null),
+      own ? (a) => editBlock(a, t, S.project && S.project.pid === t.project_id ? S.project.data.tasks : [t]) : null),
+    prop("building", "Подрядчик", t.contractor || null, own ? () => editText(t, "contractor", "Подрядчик") : null),
     prop("calendar", "Начало", t.start_date ? fmtDate(t.start_date, true) : null, admin || t.can_edit ? (a) => editDate(a, t, "start_date") : null),
     t.eta && isOpen(t) ? prop("clock", "Обещано к", fmtDate(t.eta, true)) : null,
     t.fact_date ? prop("done", "Выполнено", fmtDate(t.fact_date, true)) : null,
@@ -1196,6 +1197,13 @@ function peekContent(t) {
     } else {
       statusActions.push(h("button", { class: "btn sm", onclick: () => setStatus(t, "progress") }, icon("undo"), "Вернуть в работу"));
     }
+  }
+  if (t.can_cover && isOpen(t)) {
+    const whom = people(t).map((m) => m.name).join(", ") || t.responsible || "ответственного";
+    statusActions.push(h("button", { class: "btn sm primary", onclick: async () => {
+      if (!(await confirmDialog(`Отметить задачу выполненной за ${whom}? Ему придёт сообщение в Telegram.`, "Выполнить", false))) return;
+      await setStatus(t, "done");
+    } }, icon("tick"), phone ? "Выполнить за другого" : `Выполнить за ${whom}`));
   }
   const actions = phone ? [] : statusActions;
   if (canWrite() && (t.can_edit || admin)) {

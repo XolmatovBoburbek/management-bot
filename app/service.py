@@ -167,6 +167,8 @@ class Service:
             known = known or by_name.get(norm_text(str(item["name"])))
             if known:
                 self._merge_aliases(known, str(item.get("aliases", "")))
+                if item.get("covers") and not known.can_cover:
+                    self.db.set_member_cover(known.id, True)
                 continue
             created.append((item, self.db.upsert_member(
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
@@ -182,6 +184,8 @@ class Service:
                         self.db.set_setting("events_to", str(target.id))
                         break
         for item, member in created:
+            if item.get("covers"):
+                self.db.set_member_cover(member.id, True)
             target = self.db.member_by_username(str(item.get("assists", "")))
             if target and target.id != member.id:
                 self.db.set_assists(member.id, target.id)
@@ -218,7 +222,7 @@ class Service:
                 raise ValueError("Участник не может выполнять задачи сам за себя")
             if not self.db.get_member(assists_id):
                 raise ValueError("Участник, за которого выполняются задачи, не найден")
-        return self.db.upsert_member(
+        saved = self.db.upsert_member(
             member_id=int(member_id) if member_id else None, name=name,
             username=str(data.get("username", "")), role=str(data.get("role", "")),
             aliases=str(data.get("aliases", "")), phone=str(data.get("phone", "")),
@@ -226,6 +230,9 @@ class Service:
             active=bool(data.get("active", True)), assists_id=assists_id,
             is_observer=bool(data.get("is_observer")),
         )
+        if "can_cover" in data:
+            self.db.set_member_cover(saved.id, bool(data.get("can_cover")))
+        return self.db.get_member(saved.id)  # type: ignore[return-value]
 
     # ---------- имена из таблиц без участника ----------
     def unmatched_names(self) -> list[dict]:
@@ -430,8 +437,15 @@ class Service:
             raise LookupError("Задача не найдена")
         return task
 
+    def can_cover(self, actor: Member | None, task: Task) -> bool:
+        """Может закрыть чужую задачу за ответственного (право «выполняет за других»)."""
+        return bool(actor and actor.can_cover and not actor.is_observer and not self.can_edit(actor, task))
+
     async def set_status(self, task: Task, status: str, actor: Member) -> Task:
-        self.require_task_access(actor, task)
+        covering = self.can_cover(actor, task)
+        if not covering:
+            self.require_task_access(actor, task)
+        owners = self.team().assignees(task) if covering else []
         if status not in STATUS_LABELS:
             raise ValueError("Неизвестный статус")
         today = self.today()
@@ -446,7 +460,13 @@ class Service:
         if task.stage_id and not self._stage_fits(self.db.get_stage(task.stage_id), status):
             fields["stage_id"] = None  # карточка переедет в колонку, связанную с новым статусом
         updated = self.db.update_task(task.id, **fields)
-        self._event(task.id, "status", STATUS_LABELS[status], actor)
+        names = ", ".join(m.name for m in owners) or task.responsible or "ответственного"
+        self._event(task.id, "status", STATUS_LABELS[status] + (f" — за {names}" if covering else ""), actor)
+        if covering:
+            for m in owners:
+                if m.telegram_id and m.id != actor.id:
+                    await self.notifier.send(m.telegram_id, f"🤝 <b>{texts.e(actor.name)}</b> отметил(а) за вас: "
+                                             f"{STATUS_LABELS[status].lower()}\n<b>{texts.e(task.title)}</b>")
         if status in DONE_STATUSES and task.status not in DONE_STATUSES:
             late = " (с просрочкой)" if status == DONE_LATE else ""
             await self._to_group(f"✅ {texts.e(actor.mention)} закрыл(а) «{texts.e(task.title)}»{late}")
@@ -519,7 +539,7 @@ class Service:
         return fields
 
     # Что участник (не админ) может менять в своих задачах
-    SELF_EDIT_FIELDS = {"deadline", "start_date", "description"}
+    SELF_EDIT_FIELDS = {"title", "deadline", "start_date", "description", "priority", "block", "contractor", "proof"}
 
     def _require_self_service(self, actor: Member | None) -> None:
         """Участник команды (не наблюдатель) может вести свои задачи сам."""
@@ -557,7 +577,7 @@ class Service:
         status = fields.pop("status", None)
         changes = [k for k, v in fields.items() if getattr(task, k) != v]
         if not actor.is_admin and set(changes) - self.SELF_EDIT_FIELDS:
-            raise AccessError("В своей задаче можно менять срок, дату начала и описание — остальное меняет администратор")
+            raise AccessError("Ответственного меняет администратор — свою задачу можно править во всём остальном")
         if not changes and not status:
             return task
         updated = self.db.update_task(task.id, **{k: fields[k] for k in changes})

@@ -115,3 +115,16 @@ def test_events_recipient_from_team_yaml_and_settings(service):
     shahzod = service.db.member_by_username("s_maxhan")
     service.update_settings({"events_to": str(shahzod.id)}, shahzod)
     assert [m.name for m in service.event_recipients()] == ["Шахзод"]
+
+
+async def test_all_tasks_of_workspace_for_person_filter(client, service, workbook):
+    from tests.test_web import upload
+    admin = await tg(client)
+    await upload(client, workbook, admin)
+    wid = (await (await client.get("/api/bootstrap", headers=admin)).json())["workspaces"][0]["id"]
+    sarvar = await tg(client, 106, "gflwwc")
+    data = await (await client.get(f"/api/w/{wid}/tasks", headers=sarvar)).json()
+    total = len(service.db.list_tasks(service.default_project().id))
+    assert len(data["tasks"]) == total
+    mine = [t for t in data["tasks"] if t["can_edit"]]
+    assert mine and all(t["mine"] for t in mine) and all(not t["can_cover"] for t in data["tasks"])

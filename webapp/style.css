@@ -1181,6 +1181,13 @@ button.stat:hover { background: var(--hover); }
 }
 
 
+/* ---------- все задачи: выбор человека ---------- */
+.person-chips-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.person-chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px 0 6px; border-radius: 15px; font-size: 14px; box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text); }
+.person-chip:first-child { padding-left: 12px; }
+.person-chip:hover { background: var(--hover); }
+.person-chip.on { background: var(--blue); color: #fff; box-shadow: none; }
+
 /* ---------- имена из таблиц без участника ---------- */
 .unmatched { margin: 4px 0 18px; padding: 12px 14px; border-radius: 10px; background: var(--c-yellow-col, rgba(251, 243, 219, .6)); box-shadow: inset 0 0 0 1px var(--border); }
 .unmatched-head { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
