@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS members (
     assists_id INTEGER,
     is_observer INTEGER DEFAULT 0,
     can_cover INTEGER DEFAULT 0,
+    can_assign INTEGER DEFAULT 0,
     created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS projects (
@@ -285,6 +286,7 @@ def _member_from_row(row: sqlite3.Row) -> Member:
         assists_id=row["assists_id"],
         is_observer=bool(row["is_observer"]),
         can_cover=bool(row["can_cover"]),
+        can_assign=bool(row["can_assign"]),
     )
 
 
@@ -400,6 +402,8 @@ class Database:
             self.conn.execute("ALTER TABLE members ADD COLUMN is_observer INTEGER DEFAULT 0")
         if "can_cover" not in columns:
             self.conn.execute("ALTER TABLE members ADD COLUMN can_cover INTEGER DEFAULT 0")
+        if "can_assign" not in columns:
+            self.conn.execute("ALTER TABLE members ADD COLUMN can_assign INTEGER DEFAULT 0")
         for table, column, ddl in (
             ("projects", "workspace_id", "INTEGER"),
             ("task_events", "actor_name", "TEXT DEFAULT ''"),
@@ -505,6 +509,10 @@ class Database:
         uname = (username or "").lstrip("@").strip().lower()
         row = self.conn.execute("SELECT id FROM members WHERE lower(username) = ?", (uname,)).fetchone() if uname else None
         return row["id"] if row else None
+
+    def set_member_assign(self, member_id: int, can_assign: bool) -> None:
+        self.conn.execute("UPDATE members SET can_assign = ? WHERE id = ?", (int(can_assign), member_id))
+        self.conn.commit()
 
     def set_member_cover(self, member_id: int, can_cover: bool) -> None:
         self.conn.execute("UPDATE members SET can_cover = ? WHERE id = ?", (int(can_cover), member_id))

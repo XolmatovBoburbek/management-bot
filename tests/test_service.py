@@ -439,3 +439,19 @@ async def test_cover_for_colleague_and_full_self_edit(service, workbook, notifie
     assert edited.title == "Пресс-волл 7×3" and edited.block == "ПЕЧАТЬ"
     with pytest.raises(AccessError):
         await service.update_task(edited, {"responsible": "Асл"}, sarvar)
+
+
+async def test_handover_right_reassigns_any_task(service, workbook, notifier):
+    project = await load(service, workbook)
+    ibragim = member(service, "ik7777777777")  # наблюдатель, но с правом передавать задачи (team.yaml)
+    assert ibragim.can_assign and member(service, "khodjaevo").can_assign and member(service, "gulyamov_330").can_assign
+    kv = by_title(service, project)["Key Visual мероприятия"]
+    notifier.messages.clear()
+    moved = await service.update_task(kv, {"responsible": "Мухаммаджон"}, ibragim)
+    assert moved.responsible == "Мухаммаджон"
+    assert any("Вам назначена задача" in m for m in notifier.to(MUH_TG))
+    assert "передано: Сарвар → Мухаммаджон" in service.db.task_events(kv.id)[-1]["text"]
+    with pytest.raises(AccessError):  # кроме ответственного в чужой задаче ничего не меняет
+        await service.update_task(moved, {"deadline": "30.10"}, ibragim)
+    with pytest.raises(AccessError):  # без права — нельзя
+        await service.update_task(moved, {"responsible": "Асл"}, member(service, "gflwwc"))

@@ -169,6 +169,8 @@ class Service:
                 self._merge_aliases(known, str(item.get("aliases", "")))
                 if item.get("covers") and not known.can_cover:
                     self.db.set_member_cover(known.id, True)
+                if item.get("assigns") and not known.can_assign:
+                    self.db.set_member_assign(known.id, True)
                 continue
             created.append((item, self.db.upsert_member(
                 name=str(item["name"]), username=str(item.get("username", "")), role=str(item.get("role", "")),
@@ -186,6 +188,8 @@ class Service:
         for item, member in created:
             if item.get("covers"):
                 self.db.set_member_cover(member.id, True)
+            if item.get("assigns"):
+                self.db.set_member_assign(member.id, True)
             target = self.db.member_by_username(str(item.get("assists", "")))
             if target and target.id != member.id:
                 self.db.set_assists(member.id, target.id)
@@ -232,6 +236,8 @@ class Service:
         )
         if "can_cover" in data:
             self.db.set_member_cover(saved.id, bool(data.get("can_cover")))
+        if "can_assign" in data:
+            self.db.set_member_assign(saved.id, bool(data.get("can_assign")))
         return self.db.get_member(saved.id)  # type: ignore[return-value]
 
     # ---------- имена из таблиц без участника ----------
@@ -571,17 +577,23 @@ class Service:
         return task
 
     async def update_task(self, task: Task, data: dict, actor: Member) -> Task:
-        if not (actor and actor.is_admin):
-            self.require_task_access(actor, task)
         fields = self._clean_fields(data)
         status = fields.pop("status", None)
         changes = [k for k, v in fields.items() if getattr(task, k) != v]
-        if not actor.is_admin and set(changes) - self.SELF_EDIT_FIELDS:
-            raise AccessError("Ответственного меняет администратор — свою задачу можно править во всём остальном")
+        if not (actor and actor.is_admin):
+            # право «передаёт задачи»: можно сменить ответственного у любой задачи
+            handover = bool(actor and actor.can_assign) and changes == ["responsible"] and not status
+            if not handover:
+                self.require_task_access(actor, task)
+                allowed = self.SELF_EDIT_FIELDS | ({"responsible"} if actor.can_assign else set())
+                if set(changes) - allowed:
+                    raise AccessError("Ответственного меняет администратор — свою задачу можно править во всём остальном")
         if not changes and not status:
             return task
         updated = self.db.update_task(task.id, **{k: fields[k] for k in changes})
-        if changes:
+        if changes == ["responsible"]:
+            self._event(task.id, "edit", f"передано: {task.responsible or '—'} → {updated.responsible or '—'}", actor)
+        elif changes:
             self._event(task.id, "edit", "изменено: " + ", ".join(changes), actor)
         if status and status != task.status:
             updated = await self.set_status(updated, status, actor)

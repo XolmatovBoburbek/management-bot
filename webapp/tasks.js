@@ -1172,7 +1172,7 @@ function peekContent(t) {
     prop("user", "Ответственный", owners.length
       ? h("span", { class: "person-chips" }, owners.map((m) => h("span", { class: "person" }, avatar(m.name, m.id, "xs"), m.name,
         m.username ? h("a", { class: "person-link", href: "https://t.me/" + m.username, target: "_blank", rel: "noopener", onclick: (e) => e.stopPropagation() }, "@" + m.username) : null)))
-      : t.responsible || null, admin ? (a) => editAssignee(a, t) : null),
+      : t.responsible || null, admin || t.can_assign ? (a) => editAssignee(a, t) : null),
     prop("calendar", "Срок", t.deadline ? h("span", null, fmtDate(t.deadline, true),
       isOpen(t) ? h("span", { class: "prop-note" + (t.days_left < 0 ? " text-red" : "") }, " · " + daysText(t.days_left)) : null) : null,
     admin || t.can_edit ? (a) => editDate(a, t, "deadline") : null),
@@ -1206,6 +1206,9 @@ function peekContent(t) {
     } }, icon("tick"), phone ? "Выполнить за другого" : `Выполнить за ${whom}`));
   }
   const actions = phone ? [] : statusActions;
+  if (t.can_assign && !admin && isOpen(t)) {
+    actions.push(h("button", { class: "btn sm", onclick: (e) => editAssignee(e.currentTarget, t) }, icon("users"), "Передать другому"));
+  }
   if (canWrite() && (t.can_edit || admin)) {
     actions.push(h("button", { class: "btn sm", onclick: () => openCallForm({ task_id: t.id, contact: t.contractor || "", project_id: t.project_id }) },
       icon("phone"), "Звонок"));

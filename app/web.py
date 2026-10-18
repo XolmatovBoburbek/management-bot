@@ -281,6 +281,7 @@ def _task_dict(task: Task, today: date, team: logic.Team, my_ids: set[int], acto
     data["mine"] = task.id in my_ids
     data["can_edit"] = actor.is_admin or task.id in my_ids
     data["can_cover"] = bool(actor.can_cover and not actor.is_observer and not data["can_edit"])
+    data["can_assign"] = bool(actor.is_admin or actor.can_assign)
     return data
 
 

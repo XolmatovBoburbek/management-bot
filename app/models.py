@@ -108,6 +108,7 @@ class Member:
     assists_id: int | None = None  # помогает этому участнику: получает те же задачи и напоминания
     is_observer: bool = False  # наблюдатель: видит весь проект и получает сводку, но ничего не меняет
     can_cover: bool = False  # может отметить выполненной задачу за другого, если тот не успевает
+    can_assign: bool = False  # может передать любую задачу другому человеку (сменить ответственного)
 
     @property
     def sees_all(self) -> bool:
@@ -146,6 +147,7 @@ class Member:
             "assists_id": self.assists_id,
             "is_observer": self.is_observer,
             "can_cover": self.can_cover,
+            "can_assign": self.can_assign,
         }
 
 
