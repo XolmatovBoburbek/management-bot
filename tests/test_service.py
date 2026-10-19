@@ -455,3 +455,15 @@ async def test_handover_right_reassigns_any_task(service, workbook, notifier):
         await service.update_task(moved, {"deadline": "30.10"}, ibragim)
     with pytest.raises(AccessError):  # без права — нельзя
         await service.update_task(moved, {"responsible": "Асл"}, member(service, "gflwwc"))
+
+
+async def test_coverer_comments_on_others_tasks_and_owner_gets_it_in_bot(service, workbook, notifier):
+    project = await load(service, workbook)
+    kv = by_title(service, project)["Key Visual мероприятия"]  # задача Сарвара
+    notifier.messages.clear()
+    await service.add_comment(kv, "Нужен вариант в тёмных тонах", member(service, "khodjaevo"))
+    _, text, keyboard = next(x for x in notifier.messages if x[0] == SARVAR_TG)
+    assert "Олимхон" in text and "тёмных тонах" in text and "Key Visual" in text
+    assert keyboard and keyboard.inline_keyboard
+    with pytest.raises(AccessError):  # без права чужие задачи не комментирует
+        await service.add_comment(kv, "x", member(service, "raxmanov7777"))

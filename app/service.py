@@ -480,11 +480,23 @@ class Service:
         return updated
 
     async def add_comment(self, task: Task, text: str, actor: Member) -> None:
-        self.require_task_access(actor, task)
+        # с правом «выполняет за других» можно комментировать и чужие задачи
+        if not self.can_cover(actor, task):
+            self.require_task_access(actor, task)
         text = text.strip()
         if not text:
             raise ValueError("Пустой комментарий")
         self._event(task.id, "comment", text[:2000], actor)
+        # ответственным — сообщение в бот: кто написал, что, и сама задача с кнопками
+        team = self.team()
+        for m in team.assignees(task):
+            if m.telegram_id and m.id != actor.id:
+                await self.notifier.send(
+                    m.telegram_id,
+                    f"💬 <b>{texts.e(actor.name)}</b> оставил(а) комментарий к вашей задаче:\n"
+                    f"<blockquote>{texts.e(text[:1500])}</blockquote>\n\n"
+                    + texts.task_card(task, self._project(task), self.today(), team),
+                    keyboards.task_actions(task, self.webapp_url))
         self._queue_write(task)
 
     async def report_problem(self, task: Task, text: str, actor: Member) -> Task:

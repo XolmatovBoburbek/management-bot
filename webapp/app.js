@@ -1605,7 +1605,7 @@ function memberModal(m) {
     is_admin: [h("input", { type: "checkbox", checked: m && m.is_admin }), "Администратор в боте", "Загрузка таблиц и любые правки из Telegram"],
     is_pm: [h("input", { type: "checkbox", checked: m && m.is_pm }), "PM", "Получает эскалации и утреннюю сводку"],
     is_observer: [h("input", { type: "checkbox", checked: m && m.is_observer }), "Наблюдатель", "Видит весь проект и получает сводку, ничего не меняет"],
-    can_cover: [h("input", { type: "checkbox", checked: m && m.can_cover }), "Выполняет за других", "Может отметить выполненной чужую задачу, если человек не успевает"],
+    can_cover: [h("input", { type: "checkbox", checked: m && m.can_cover }), "Выполняет за других", "Может отметить выполненной чужую задачу и оставлять комментарии к чужим задачам — хозяину придёт сообщение в бот"],
     can_assign: [h("input", { type: "checkbox", checked: m && m.can_assign }), "Передаёт задачи другим", "Может сменить ответственного у любой задачи — новому человеку придёт сообщение"],
     active: [h("input", { type: "checkbox", checked: !m || m.active }), "Активен", "Неактивным бот не пишет"],
   };

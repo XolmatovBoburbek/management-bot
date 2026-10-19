@@ -1216,7 +1216,7 @@ function peekContent(t) {
 
   const comments = t.events.filter((e) => e.kind === "comment" || e.kind === "problem").slice().reverse();
   const history = t.events;
-  const composer = t.can_edit ? commentComposer(t) : null;
+  const composer = t.can_edit || t.can_cover ? commentComposer(t) : null;
 
   return h("div", { class: "peek-inner" },
     h("div", { class: "peek-top" },
